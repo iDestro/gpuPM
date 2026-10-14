@@ -33,6 +33,7 @@ def overview(request: Request):
     return dict(
         gpus=snap["gpus"],
         task_count=sum(t["status"] != "finished" for t in tasks),
+        awaiting_cleanup_count=sum(t["status"] == "awaiting_cleanup" for t in tasks),
         overdue_count=sum(t["overdue"] for t in tasks),
         anomaly_count=sum(bool(t["anomalies"]) for t in tasks),
         collected_at=snap["collected_at"],
@@ -74,6 +75,10 @@ def tasks(
         result = [t for t in result if t["overdue"]]
     elif status == "anomaly":
         result = [t for t in result if t["anomalies"]]
+    elif status == "active":
+        result = [
+            t for t in result if t["status"] in {"running", "finalizing", "awaiting_cleanup", "cleaning"}
+        ]
     elif status:
         result = [t for t in result if t["status"] == status]
     key = {"priority": "priority_tuple", "runtime": "runtime_seconds", "memory": "memory_used"}[sort]

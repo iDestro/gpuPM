@@ -73,13 +73,11 @@ const taskFields: Field[] = [
       { label: "自动终止", value: "terminate" },
     ],
   },
-  {
-    name: "cleanup_orphans",
-    label: "自动清理已确认残留 worker",
-    type: "switch",
-    help: "归属不明的进程不会自动清理",
-  },
+  { name: "orphan_reminder", label: "残留提醒", type: "switch", help: "主进程退出后等待提醒；残留进程仅由管理员预览确认后终止" },
+  { name: "orphan_wait_seconds", label: "残留等待时间", type: "duration", required: true, min: 1, max: 86400 },
 ];
+const preciseDuration = (seconds: number) => translate("{hours}时 {minutes}分 {seconds}秒", { hours: Math.floor(seconds / 3600), minutes: Math.floor(seconds % 3600 / 60), seconds: seconds % 60 });
+const residualEligible = (task: Row, stale = false) => task.status === "awaiting_cleanup" && task.is_human && !task.protected && !task.stale && !stale && task.policy_status === "applied";
 const scopeOptions = [{ label: "人员账号", value: "human" }, { label: "其他账号（只读）", value: "other" }, { label: "全部账号", value: "all" }];
 const classification = () => ({ width: 145, title: translate("分类"), dataIndex: "is_human", render: (v: boolean) => <Tag>{v ? translate("人员账号") : translate("其他账号 · 只读")}</Tag> });
 const label = (value: any) => (value == null ? translate("无数据") : String(value));
@@ -161,8 +159,9 @@ export function Overview() {
               [translate("运行任务"), d.task_count],
               [translate("超时任务"), d.overdue_count],
               [translate("异常告警"), d.anomaly_count],
+              [translate("待清理任务"), d.awaiting_cleanup_count],
             ].map(([title, value]) => (
-              <Col xs={24} md={8} key={title}>
+              <Col xs={24} md={6} key={title}>
                 <Card>
                   <Statistic title={title} value={value ?? translate("无数据")} />
                 </Card>
@@ -230,7 +229,7 @@ export function Tasks() {
     page_size: 20,
     sort: "priority",
     scope: "human",
-    status: "running",
+    status: "active",
   });
   const [selected, setSelected] = useState<React.Key[]>([]);
   const [merging, setMerging] = useState(false);
@@ -294,7 +293,11 @@ export function Tasks() {
             placeholder={translate("全部状态")}
             allowClear
             options={[
+              { label: translate("全部进行中任务"), value: "active" },
               { label: translate("运行中"), value: "running" },
+              { label: translate("收尾中"), value: "finalizing" },
+              { label: translate("待清理"), value: "awaiting_cleanup" },
+              { label: translate("清理中"), value: "cleaning" },
               { label: translate("已超时"), value: "overdue" },
               { label: translate("有异常"), value: "anomaly" },
               { label: translate("已结束"), value: "finished" },
@@ -326,7 +329,7 @@ export function Tasks() {
             onChange: setSelected,
             getCheckboxProps: (r) => ({ disabled: !r.is_human || r.protected }),
           }}
-          scroll={{ x: 1120 }}
+          scroll={{ x: 1400 }}
           pagination={{
             current: filter.page,
             pageSize: filter.page_size,
@@ -378,10 +381,18 @@ export function Tasks() {
                 </Space>
               ),
             },
+            { title: <TermLabel label="残留提醒" />, width: 190, render: (_, r) => <Space direction="vertical" size={0}>
+              <span>{translate(r.orphan_reminder ? "已启用" : "已关闭")} · {translate("等待 {duration}", { duration: preciseDuration(r.orphan_wait_seconds ?? 300) })}</span>
+              {r.orphan_remaining_seconds != null ? <span>{translate("提醒剩余 {duration}", { duration: preciseDuration(r.orphan_remaining_seconds) })}</span> : null}
+              {r.status === "awaiting_cleanup" ? <Typography.Text type="warning">{translate("主进程已退出，残留进程等待人工处理")}</Typography.Text> : null}
+            </Space> },
             {
               title: translate("操作"),
-              width: 100,
-              render: (_, r) => <Button danger size="small" disabled={!r.is_human || r.protected} onClick={() => setTermination(r)}>{translate("终止任务")}</Button>,
+              width: 160,
+              render: (_, r) => <Space direction="vertical" size={4}>
+                {residualEligible(r, data?.stale) ? <Button danger size="small" onClick={() => setTermination({ ...r, residualOnly: true })}>{translate("终止残留进程")}</Button> : null}
+                <Button danger size="small" disabled={!r.is_human || r.protected} onClick={() => setTermination(r)}>{translate("终止任务")}</Button>
+              </Space>,
             },
             {
               title: translate("异常"),
@@ -393,7 +404,7 @@ export function Tasks() {
           ]}
         />
       </Card>
-      {termination ? <TerminationDialog task={termination} onClose={() => setTermination(null)} /> : null}
+      {termination ? <TerminationDialog task={termination} residualOnly={termination.residualOnly} onClose={() => setTermination(null)} /> : null}
       {merging ? (
         <PreviewMerge
           selected={selected}
@@ -491,7 +502,7 @@ export function TaskDetail() {
   const build = (p: Row, visited: Set<number>): any => ({
     key: JSON.stringify(p.identity),
     title: (
-      <Space>
+      <Space wrap>
         <Tag>PID {p.pid}</Tag>
         <Status value={p.status} />
         {p.uninterruptible_seconds != null ? <Tag color="orange">{translate("D 状态持续 {duration}", { duration: duration(p.uninterruptible_seconds) })}</Tag> : null}
@@ -514,11 +525,12 @@ export function TaskDetail() {
         title={d?.name || translate("任务详情")}
         description={translate("身份以启动标识、PID 与启动时钟核验。父级 shell / SSH 只作为上下文展示。")}
         action={
-          <Space>
+          <Space wrap>
             <Link to="/tasks">{translate("返回列表")}</Link>
             <Button onClick={() => setEditing(true)} disabled={!d || !d.is_human}>
               {translate("编辑策略")}
             </Button>
+            {d && residualEligible(d) ? <Button danger onClick={() => setTermination({ residualOnly: true })}>{translate("终止残留进程")}</Button> : null}
             <Button
               danger
               disabled={!d || !d.is_human || d.protected}
@@ -542,6 +554,11 @@ export function TaskDetail() {
                 业务组: d.group_id,
                 三级优先级: d.priority_tuple,
                 保护状态: d.protected ? translate("已保护") : translate("未保护"),
+                状态: statusLabel(d.status),
+                残留提醒: translate(d.orphan_reminder ? "已启用" : "已关闭"),
+                残留等待时间: preciseDuration(d.orphan_wait_seconds),
+                收尾开始时间: date(d.finalizing_since),
+                提醒剩余时间: d.orphan_remaining_seconds == null ? "—" : preciseDuration(d.orphan_remaining_seconds),
                 运行时间: duration(d.runtime_seconds),
                 剩余时间: duration(d.remaining_seconds),
                 预计结束时间: date(d.deadline_at),
@@ -551,6 +568,7 @@ export function TaskDetail() {
                 备注: d.notes,
               }}
             />
+            {d.status === "awaiting_cleanup" ? <Alert type="warning" showIcon message={translate("主进程已退出，残留进程等待人工处理")} description={translate("预览并填写原因后才能终止；也可以等待进程自然退出。不会自动清理。")} /> : null}
             {d.overdue ? (
               <Alert
                 type="warning"
@@ -610,7 +628,7 @@ export function TaskDetail() {
                 },
               ]}
             />
-            <Space>
+            <Space wrap>
               <Button
                 disabled={!d.is_human || d.protected || !chosen.length}
                 onClick={() => setMembership("split")}
@@ -641,7 +659,8 @@ export function TaskDetail() {
       {termination && d ? (
         <TerminationDialog
           task={d}
-          identity={Object.keys(termination).length ? termination : undefined}
+          residualOnly={termination.residualOnly}
+          identity={!termination.residualOnly && Object.keys(termination).length ? termination : undefined}
           onClose={() => setTermination(null)}
         />
       ) : null}
@@ -1620,7 +1639,8 @@ export function Settings() {
     default_task_protected: "默认任务保护",
     default_task_priority: "默认任务优先级",
     default_deadline_action: "默认到期动作",
-    default_cleanup_orphans: "默认残留 worker 清理",
+    default_orphan_reminder: "默认残留提醒",
+    default_orphan_wait_seconds: "默认残留等待时间",
     scan_interval_seconds: "GPU 扫描周期",
     term_grace_seconds: "终止等待时间",
     storage_scan_interval_seconds: "存储扫描周期",
@@ -1628,7 +1648,7 @@ export function Settings() {
     critical_percent: "容量严重阈值",
   };
   const groups = [
-    { title: "新任务默认策略", names: ["default_max_runtime_seconds", "default_task_protected", "default_task_priority", "default_deadline_action", "default_cleanup_orphans"] },
+    { title: "新任务默认策略", names: ["default_max_runtime_seconds", "default_task_protected", "default_task_priority", "default_deadline_action", "default_orphan_reminder", "default_orphan_wait_seconds"] },
     { title: "扫描与运行策略", names: ["scan_interval_seconds", "term_grace_seconds", "storage_scan_interval_seconds"] },
     { title: "存储告警阈值", names: ["warning_percent", "critical_percent"] },
   ];
@@ -1641,11 +1661,11 @@ export function Settings() {
   const fields: Field[] = Object.entries(labels).map(([name, label]) => ({
     name,
     label,
-    type: ["default_task_protected", "default_cleanup_orphans"].includes(name) ? "switch" : name === "default_deadline_action" ? "select" : name === "default_max_runtime_seconds" ? "duration" : "number",
-    required: !["default_max_runtime_seconds", "default_task_protected", "default_cleanup_orphans"].includes(name),
+    type: ["default_task_protected", "default_orphan_reminder"].includes(name) ? "switch" : name === "default_deadline_action" ? "select" : ["default_max_runtime_seconds", "default_orphan_wait_seconds"].includes(name) ? "duration" : "number",
+    required: !["default_max_runtime_seconds", "default_task_protected", "default_orphan_reminder"].includes(name),
     min: name === "default_task_priority" ? 0 : name === "storage_scan_interval_seconds" ? 60 : name === "critical_percent" ? 2 : 1,
-    max: ({ default_task_priority: 100, scan_interval_seconds: 300, term_grace_seconds: 120, storage_scan_interval_seconds: 86400 } as Record<string, number>)[name] ?? (name === "warning_percent" ? 99 : name === "critical_percent" ? 100 : undefined),
-    help: name === "default_max_runtime_seconds" ? "从任务启动时刻计算；留空或点击“不限时”可取消时限" : name === "default_task_protected" ? "保护任务超时只提醒，不自动终止；系统与维护任务的保护仍生效。" : name === "default_cleanup_orphans" ? "归属不明的进程不会自动清理" : ["scan_interval_seconds", "term_grace_seconds", "storage_scan_interval_seconds"].includes(name) ? "单位：秒" : name.endsWith("percent") ? "单位：百分比" : undefined,
+    max: ({ default_orphan_wait_seconds: 86400, default_task_priority: 100, scan_interval_seconds: 300, term_grace_seconds: 120, storage_scan_interval_seconds: 86400 } as Record<string, number>)[name] ?? (name === "warning_percent" ? 99 : name === "critical_percent" ? 100 : undefined),
+    help: name === "default_max_runtime_seconds" ? "从任务启动时刻计算；留空或点击“不限时”可取消时限" : name === "default_task_protected" ? "保护任务超时只提醒，不自动终止；系统与维护任务的保护仍生效。" : name === "default_orphan_reminder" ? "主进程退出后等待提醒；残留进程仅由管理员预览确认后终止" : ["scan_interval_seconds", "term_grace_seconds", "storage_scan_interval_seconds"].includes(name) ? "单位：秒" : name.endsWith("percent") ? "单位：百分比" : undefined,
     options: name === "default_deadline_action" ? [
       { label: translate("仅提醒"), value: "notify" },
       { label: translate("自动终止"), value: "terminate" },
@@ -1676,9 +1696,9 @@ export function Settings() {
                 {names.map((name) => (
                   <Descriptions.Item key={name} label={<TermLabel label={labels[name]} />}>
                     {name === "default_task_protected" ? translate(q.data[name] ? "已保护" : "未保护")
-                      : name === "default_cleanup_orphans" ? translate(q.data[name] ? "已启用" : "已关闭")
+                      : name === "default_orphan_reminder" ? translate(q.data[name] ? "已启用" : "已关闭")
                       : name === "default_deadline_action" ? statusLabel(q.data[name])
-                      : name === "default_max_runtime_seconds" ? q.data[name] == null ? translate("不限时") : translate("{hours}时 {minutes}分 {seconds}秒", { hours: Math.floor(q.data[name] / 3600), minutes: Math.floor((q.data[name] % 3600) / 60), seconds: q.data[name] % 60 })
+                      : ["default_max_runtime_seconds", "default_orphan_wait_seconds"].includes(name) ? q.data[name] == null ? translate("不限时") : preciseDuration(q.data[name])
                       : name.endsWith("seconds") ? translate("{seconds} 秒", { seconds: q.data[name] ?? "—" })
                       : name.endsWith("percent") ? `${q.data[name] ?? "—"}%` : q.data[name] ?? "—"}
                   </Descriptions.Item>

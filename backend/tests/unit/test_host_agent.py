@@ -379,7 +379,7 @@ def test_incomplete_collection_blocks_signal_preview(tmp_path):
     snapshot = service.call("snapshot")
     assert snapshot["stale"]
     with pytest.raises(DomainError) as exc:
-        service.call("preview_termination", {"task_id": snapshot["tasks"][0]["id"]})
+        service.call("preview_termination", {"task_id": "unconfirmed-task"})
     assert exc.value.code == "stale_collection"
 
 
@@ -506,7 +506,7 @@ def test_worker_cleanup_requires_historic_leader_exit():
     assert not group_processes([process(21, 1, True)], original)[0]["orphan_cleanup_due"]
 
 
-def test_cleanup_tick_waits_for_latest_policy_and_records_job(tmp_path):
+def test_legacy_cleanup_tick_never_creates_job(tmp_path):
     available = [process(20, 1, True), process(21, 20)]
     service = AgentService(
         {"store_path": str(tmp_path / "agent.sqlite"), "allow_mutations": True, "term_grace_seconds": 0},
@@ -534,9 +534,7 @@ def test_cleanup_tick_waits_for_latest_policy_and_records_job(tmp_path):
     for worker in list(service.workers.values()):
         worker.join(timeout=3)
     with service.database() as db:
-        job = next(iter(service.load(db)["jobs"].values()))
-    assert job["reason"] == "confirmed policy orphan cleanup"
-    assert job["targets"][0]["pid"] == 21
+        assert not service.load(db)["jobs"]
 
 
 def test_job_records_residual_process_instead_of_signal_success(tmp_path):

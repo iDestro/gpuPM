@@ -45,6 +45,8 @@ class TaskPatch(Input):
     max_runtime_seconds: int | None = Field(default=None, gt=0, le=315360000)
     deadline_action: Literal["notify", "terminate"] | None = None
     cleanup_orphans: bool | None = None
+    orphan_reminder: bool | None = Field(default=None, strict=True)
+    orphan_wait_seconds: int | None = Field(default=None, strict=True, ge=1, le=86400)
 
     @field_validator("expires_at")
     @classmethod
@@ -61,6 +63,7 @@ class ProcessIdentity(Input):
 
 
 class TerminationPreview(Input):
+    residual_only: bool = Field(default=False, strict=True)
     identity: ProcessIdentity | None = None
 
 
@@ -77,6 +80,8 @@ class SettingsPatch(Input):
     default_task_protected: bool | None = Field(default=None, strict=True)
     default_task_priority: Priority | None = None
     default_cleanup_orphans: bool | None = Field(default=None, strict=True)
+    default_orphan_reminder: bool | None = Field(default=None, strict=True)
+    default_orphan_wait_seconds: int | None = Field(default=None, strict=True, ge=1, le=86400)
     default_deadline_action: Literal["notify", "terminate"] | None = None
     storage_scan_interval_seconds: int | None = Field(default=None, ge=60, le=86400)
     warning_percent: int | None = Field(default=None, ge=1, le=99)

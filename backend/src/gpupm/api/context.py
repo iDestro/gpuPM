@@ -105,7 +105,7 @@ class Context:
             snapshot = self.snapshot(force=True)
             if not snapshot["stale"]:
                 for task in snapshot.get("tasks", []):
-                    if task["status"] != "running" or not task.get("is_human", False):
+                    if task["status"] == "finished" or not task.get("is_human", False):
                         continue
                     with self.sessions() as db:
                         existing = db.get(TaskConfig, task["id"])
@@ -260,6 +260,9 @@ class Context:
                         policy.status if policy.status != "applied" else task.get("policy_status", "applied")
                     )
                     task["revision"] = max(task.get("revision", 1), policy.revision)
+                task["stale"] = bool(snap["stale"])
+                task.setdefault("orphan_reminder", settings["default_orphan_reminder"])
+                task.setdefault("orphan_wait_seconds", settings["default_orphan_wait_seconds"])
                 task.setdefault("priority", 50)
                 task.setdefault("notes", "")
                 task.setdefault("protected", False)

@@ -18,6 +18,8 @@ POLICY = {
     "priority": 50,
     "deadline_action": "notify",
     "cleanup_orphans": False,
+    "orphan_reminder": True,
+    "orphan_wait_seconds": 300,
 }
 TEMPLATE = {
     "default_max_runtime_seconds": 1800,
@@ -25,6 +27,8 @@ TEMPLATE = {
     "default_task_priority": 50,
     "default_deadline_action": "notify",
     "default_cleanup_orphans": False,
+    "default_orphan_reminder": True,
+    "default_orphan_wait_seconds": 300,
 }
 
 
@@ -142,6 +146,7 @@ def test_native_defaults_only_apply_to_new_ids_and_survive_restart(tmp_path):
     assert policy(first) == POLICY
     assert first["original_name"] == "python train.py"
     custom = dict(
+        POLICY,
         max_runtime_seconds=None,
         protected=True,
         priority=7,
@@ -215,6 +220,7 @@ def test_demo_seed_defaults_and_configure_restart_preserve_task_override(tmp_pat
     tasks = agent.call("snapshot")["tasks"]
     assert all(policy(task) == POLICY for task in tasks)
     custom = dict(
+        POLICY,
         max_runtime_seconds=None,
         protected=True,
         priority=10,

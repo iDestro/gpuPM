@@ -1,4 +1,15 @@
 const terms: Record<string,string> = {
+  '残留提醒':'Residual process reminder',
+  '残留等待时间':'Residual waiting duration',
+  '默认残留提醒':'Default residual process reminder',
+  '默认残留等待时间':'Default residual waiting duration',
+  '收尾开始时间':'Finalizing since',
+  '提醒剩余时间':'Time until residual reminder',
+  '待清理':'Awaiting manual residual cleanup',
+  '收尾中':'Leader exited; confirmed workers remain',
+  '清理中':'Confirmed residual termination queued or running',
+  '终止残留进程':'Terminate the exact previewed residual identities',
+
   'GPU 扫描周期':'GPU polling interval',
   'GPU 扫描周期 (秒)':'GPU polling interval',
   '终止等待时间':'SIGTERM grace period',

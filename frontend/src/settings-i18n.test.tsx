@@ -5,7 +5,7 @@ import {QueryClientProvider} from '@tanstack/react-query';
 import {queryClient} from './api';
 import {Settings} from './pages';
 import {setLocale} from './i18n';
-const settings={scan_interval_seconds:5,term_grace_seconds:10,default_max_runtime_seconds:3661,storage_scan_interval_seconds:900,warning_percent:80,critical_percent:95,default_deadline_action:'notify',default_task_protected:false,default_task_priority:50,default_cleanup_orphans:false,mode:'host',home_base:'/home',data_base:'/data/实验人员',share_base:'/data/shared'};
+const settings={scan_interval_seconds:5,term_grace_seconds:10,default_max_runtime_seconds:3661,storage_scan_interval_seconds:900,warning_percent:80,critical_percent:95,default_deadline_action:'notify',default_task_protected:false,default_task_priority:50,default_cleanup_orphans:false,default_orphan_reminder:true,default_orphan_wait_seconds:300,mode:'host',home_base:'/home',data_base:'/data/实验人员',share_base:'/data/shared'};
 afterEach(()=>{cleanup();vi.unstubAllGlobals();queryClient.clear();setLocale('zh-CN');});
 function setup(){setLocale('zh-CN');vi.stubGlobal('fetch',vi.fn(async()=>new Response(JSON.stringify(settings))));render(<QueryClientProvider client={queryClient}><Settings/></QueryClientProvider>);}
 test('settings show precise units and Chinese terms with professional English while preserving raw paths',async()=>{
@@ -24,13 +24,13 @@ test('settings show precise units and Chinese terms with professional English wh
 test('switching languages preserves an unsaved settings runtime and localizes discard confirmation',async()=>{
   setup();
   await userEvent.click(await screen.findByText('编辑策略',{selector:'span'}));
-  await userEvent.click(screen.getByText('4小时',{selector:'span'}));
+  await userEvent.click(within(screen.getByRole('group',{name:'默认最大运行时间'})).getByText('4小时',{selector:'span'}));
   act(()=>setLocale('en-US'));
-  expect(screen.getByLabelText('Hours')).toHaveValue('4');
+  expect(within(screen.getByRole('group',{name:'Default maximum runtime'})).getByLabelText('Hours')).toHaveValue('4');
   await userEvent.click(screen.getByText('Cancel',{selector:'span'}));
   await screen.findByText('Continue editing',{selector:'span'});
   await userEvent.click(screen.getByText('Continue editing',{selector:'span'}));
-  expect(screen.getByLabelText('Hours')).toHaveValue('4');
+  expect(within(screen.getByRole('group',{name:'Default maximum runtime'})).getByLabelText('Hours')).toHaveValue('4');
   expect(vi.mocked(fetch).mock.calls.every(([,options])=>options?.method!=='PATCH')).toBe(true);
 },10000);
 
@@ -40,18 +40,18 @@ test('new task defaults have separate groups and bilingual policy labels',async(
   expect(screen.getByText('扫描与运行策略')).toBeInTheDocument();
   expect(screen.getByText('初始化配置（只读）')).toBeInTheDocument();
   expect(screen.getByText('未保护')).toBeInTheDocument();
-  expect(screen.getByText('已关闭')).toBeInTheDocument();
+  expect(screen.getByText('已启用')).toBeInTheDocument();
   expect(screen.getByText('50',{exact:true})).toBeInTheDocument();
   expect(screen.queryByText('50%')).not.toBeInTheDocument();
   act(()=>setLocale('en-US'));
   expect(screen.getByText('New task defaults')).toBeInTheDocument();
   expect(screen.getByText('Default task protection')).toBeInTheDocument();
   expect(screen.getByText('Default task priority')).toBeInTheDocument();
-  expect(screen.getByText('Default orphan worker cleanup')).toBeInTheDocument();
+  expect(screen.getByText('Default residual process reminder')).toBeInTheDocument();
   expect(screen.getByText('Unprotected')).toBeInTheDocument();
-  expect(screen.getByText('Disabled')).toBeInTheDocument();
+  expect(screen.getByText('Enabled')).toBeInTheDocument();
 });
-test.each([false,true])('settings save zero priority and cleanup=%s without initialization or task operations',async(cleanupOrphans)=>{
+test.each([false,true])('settings save zero priority and reminder=%s without initialization or task operations',async(reminder)=>{
   setup();
   await userEvent.click(await screen.findByText('编辑策略',{selector:'span'}));
   const dialog=within(screen.getByText('编辑全局策略').closest('[role="dialog"]') as HTMLElement);
@@ -61,12 +61,12 @@ test.each([false,true])('settings save zero priority and cleanup=%s without init
   await userEvent.clear(priority);
   await userEvent.type(priority,'0');
   expect(dialog.getByLabelText('默认任务保护')).toHaveAttribute('aria-checked','false');
-  if(cleanupOrphans) await userEvent.click(dialog.getByLabelText('默认残留 worker 清理'));
+  if(!reminder) await userEvent.click(dialog.getByLabelText('默认残留提醒'));
   await userEvent.click(dialog.getByText(/^保\s*存$/,{selector:'span'}));
   await waitFor(()=>expect(vi.mocked(fetch).mock.calls.some(([,options])=>options?.method==='PATCH')).toBe(true));
   const writes=vi.mocked(fetch).mock.calls.filter(([,options])=>options?.method==='PATCH');
   expect(writes).toHaveLength(1);
   expect(writes[0][0]).toBe('/api/settings');
-  const {mode,home_base,data_base,share_base,...editable}=settings;
-  expect(JSON.parse(String(writes[0][1]?.body))).toEqual({...editable,default_task_priority:0,default_task_protected:false,default_cleanup_orphans:cleanupOrphans});
+  const {mode,home_base,data_base,share_base,default_cleanup_orphans,...editable}=settings;
+  expect(JSON.parse(String(writes[0][1]?.body))).toEqual({...editable,default_task_priority:0,default_task_protected:false,default_orphan_reminder:reminder});
 },10000);

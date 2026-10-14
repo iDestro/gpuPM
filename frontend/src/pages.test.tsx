@@ -213,8 +213,8 @@ test("task list defaults to human and opens existing termination preview", async
   expect(buttons[0]).toBeEnabled();
   expect(buttons[1]).toBeDisabled();
   expect(request.mock.calls[0][0]).toContain("scope=human");
-  expect(request.mock.calls[0][0]).toContain("status=running");
-  expect(screen.getByText("运行中", {exact:true})).toBeVisible();
+  expect(request.mock.calls[0][0]).toContain("status=active");
+  expect(screen.getByText("全部进行中任务", {exact:true})).toBeVisible();
   expect(request.mock.calls.some(([url]) => url === "/api/users?scope=human")).toBe(true);
   await userEvent.click(buttons[0]);
   await screen.findByText("终止范围预览");

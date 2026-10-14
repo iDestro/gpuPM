@@ -7,6 +7,8 @@ from datetime import timedelta
 from pathlib import Path
 from uuid import uuid4
 
+from gpupm.agent.processes import residual_ready, residual_status, shell_process
+from gpupm.domain.schemas import TaskPatch, SettingsPatch
 from gpupm.domain.rules import account_status, parse_time, utcnow, validate_name
 from gpupm.domain.settings import DEFAULT_SETTINGS, task_defaults
 from gpupm.errors import DomainError
@@ -58,7 +60,8 @@ class DemoAgent:
                 task.setdefault(
                     "original_name",
                     {"demo-task-1": "alice / training", "demo-task-2": "bob / training"}.get(
-                        task["id"], next((p["command"][:120] for p in task["members"] if p.get("gpu_memory")), None)
+                        task["id"],
+                        next((p["command"][:120] for p in task["members"] if p.get("gpu_memory")), None),
                     ),
                 )
             db.execute("UPDATE state SET data=? WHERE id=1", (json.dumps(state),))
@@ -262,7 +265,18 @@ class DemoAgent:
             )
         humans = {a["uid"] for a in state["accounts"] if a["is_human"]}
         for task in state["tasks"]:
+            for field in ("orphan_reminder", "orphan_wait_seconds"):
+                task.setdefault(field, task_defaults(state["settings"])[field])
+            task.setdefault(
+                "leader_identities",
+                [
+                    m["identity"]
+                    for m in task["members"]
+                    if m["ppid"] not in {p["pid"] for p in task["members"]}
+                ],
+            )
             task["is_human"] = task["uid"] in humans
+            residual_status(task, utcnow())
         if method in {"preview_group_change", "execute_group_change"}:
             changes = p.get("changes", {})
             if p.get("id") == "human" or changes.get("name") == "human":
@@ -289,6 +303,7 @@ class DemoAgent:
                 account["expires_on"] + "T00:00:00+00:00" if account.get("expires_on") else None
             )
         if method == "heartbeat":
+            SettingsPatch.model_validate(p.get("settings", {}))
             state["settings"].update(p.get("settings", {}))
             return {"status": "ok", "source": "demo"}
         if method == "health":
@@ -306,6 +321,7 @@ class DemoAgent:
                 capabilities={"mutations": True},
             )
         if method == "configure":
+            SettingsPatch.model_validate(p.get("settings", {}))
             state["settings"].update(p.get("settings", {}))
             return dict(status="applied", source="demo")
         if method == "list_accounts":
@@ -321,6 +337,7 @@ class DemoAgent:
                 raise DomainError("revision_conflict", "任务版本已经改变")
             if "is_human" in p["policy"]:
                 raise DomainError("invalid_policy", "human membership is not a policy field", 422)
+            TaskPatch.model_validate(dict(revision=p["revision"], **p["policy"]))
             task.update(p["policy"])
             task["revision"] += 1
             return task
@@ -329,12 +346,31 @@ class DemoAgent:
             self.require_human(task)
             if task["protected"] or task["status"] == "finished":
                 raise DomainError("protected", "任务受保护或已结束")
-            targets = task["members"]
+            residual_only = p.get("residual_only", False)
+            if residual_only and not residual_ready(task, utcnow()):
+                raise DomainError("residual_not_ready", "residual cleanup conditions changed", 409)
+            targets = [
+                m
+                for m in task["members"]
+                if m["uid"] == task["uid"]
+                and m["uid"] in humans
+                and not shell_process(m)
+                and m["status"] not in {"zombie", "Z"}
+                and (m["ppid"] != 1 or residual_only or task.get("cleanup_orphans"))
+            ]
             if p.get("identity"):
                 targets = [m for m in targets if m["identity"] == p["identity"]]
                 if not targets:
                     raise DomainError("identity_changed", "目标进程不属于已确认任务")
             result = self.preview(state, "task", task, "terminate", targets)
+            result["excluded"] = [
+                dict(identity=m["identity"], reason="protected, zombie, or unauthorized orphan")
+                for m in task["members"]
+                if m not in targets and (not p.get("identity") or m["identity"] == p["identity"])
+            ]
+            state["previews"][result["token"]]["excluded"] = result["excluded"]
+            result["residual_only"] = residual_only
+            state["previews"][result["token"]]["residual_only"] = residual_only
             result["task_id"] = task["id"]
             return result
         if method == "execute_termination":
@@ -354,6 +390,21 @@ class DemoAgent:
             preview = self.checked_preview(state, p, "task", task, "terminate")
             if task["protected"]:
                 raise DomainError("protected", "任务受保护")
+            if preview.get("residual_only") and not residual_ready(task, utcnow()):
+                raise DomainError("residual_not_ready", "residual cleanup conditions changed", 409)
+            if not all(
+                any(
+                    m["identity"] == target["identity"]
+                    and m["uid"] == target["uid"]
+                    and m["uid"] == task["uid"]
+                    and not shell_process(m)
+                    and m["status"] not in {"zombie", "Z"}
+                    and (m["ppid"] != 1 or preview.get("residual_only") or task.get("cleanup_orphans"))
+                    for m in task["members"]
+                )
+                for target in preview["targets"]
+            ):
+                raise DomainError("scope_changed", "confirmed target scope changed")
             job = dict(
                 id=str(uuid4()),
                 status="succeeded",
@@ -366,6 +417,7 @@ class DemoAgent:
             task["members"] = [m for m in task["members"] if m["identity"] not in removed]
             if not task["members"]:
                 task["status"] = "finished"
+            residual_status(task, utcnow())
             task["revision"] += 1
             state["jobs"][job["id"]] = job
             state["idempotency"][key] = dict(id=job["id"], token=p["token"])

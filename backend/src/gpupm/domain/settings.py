@@ -8,6 +8,8 @@ DEFAULT_SETTINGS = {
     "default_task_priority": 50,
     "default_deadline_action": "notify",
     "default_cleanup_orphans": False,
+    "default_orphan_reminder": True,
+    "default_orphan_wait_seconds": 300,
     "storage_scan_interval_seconds": 900,
     "warning_percent": 80,
     "critical_percent": 90,
@@ -21,5 +23,7 @@ def task_defaults(settings):
         "priority": "default_task_priority",
         "deadline_action": "default_deadline_action",
         "cleanup_orphans": "default_cleanup_orphans",
+        "orphan_reminder": "default_orphan_reminder",
+        "orphan_wait_seconds": "default_orphan_wait_seconds",
     }
     return {field: settings.get(key, DEFAULT_SETTINGS[key]) for field, key in fields.items()}

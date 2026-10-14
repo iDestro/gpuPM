@@ -1,5 +1,5 @@
 import { afterEach, expect, test, vi } from 'vitest';
-import { cleanup, render, screen, waitFor } from '@testing-library/react';
+import { cleanup, render, screen, within, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { QueryClientProvider } from '@tanstack/react-query';
 import { MemoryRouter } from 'react-router-dom';
@@ -113,14 +113,14 @@ test('task editing offers only runtime and clears a legacy absolute expiry on sa
   const {TaskDetail}=await import('./pages');
   const {Routes,Route}=await import('react-router-dom');
   setSession({username:'admin',csrf_token:'csrf'});
-  const task={id:'task',name:'sample',priority:50,revision:2,is_human:true,protected:false,members:[],context:[],max_runtime_seconds:3600,expires_at:'2099-01-01T00:00:00Z',deadline_action:'notify',deadline_at:'2026-10-14T04:00:00Z'};
+  const task={orphan_reminder:true,orphan_wait_seconds:300,id:'task',name:'sample',priority:50,revision:2,is_human:true,protected:false,members:[],context:[],max_runtime_seconds:3600,expires_at:'2099-01-01T00:00:00Z',deadline_action:'notify',deadline_at:'2026-10-14T04:00:00Z'};
   const fetch=vi.fn(async(url:string,_options?:RequestInit)=>new Response(JSON.stringify(url.endsWith('/gpus')?{items:[]}:task)));
   vi.stubGlobal('fetch',fetch);
   render(<MemoryRouter initialEntries={['/tasks/task']}><QueryClientProvider client={queryClient}><Routes><Route path='/tasks/:id' element={<TaskDetail/>}/></Routes></QueryClientProvider></MemoryRouter>);
   await userEvent.click(await screen.findByRole('button',{name:'编辑策略'}));
   expect(screen.queryByLabelText('指定到期时间 · Asia/Shanghai')).not.toBeInTheDocument();
   expect(screen.getByText('预计结束时间')).toBeInTheDocument();
-  await userEvent.click(screen.getByRole('button',{name:'4小时'}));
+  await userEvent.click(within(screen.getByRole('group',{name:'最大运行时间'})).getByRole('button',{name:'4小时'}));
   await userEvent.click(screen.getByRole('button',{name:/保\s*存/}));
   await waitFor(()=>expect(fetch.mock.calls.some(([,options])=>(options as RequestInit)?.method==='PATCH')).toBe(true));
   const patch=fetch.mock.calls.find(([,options])=>(options as RequestInit)?.method==='PATCH');

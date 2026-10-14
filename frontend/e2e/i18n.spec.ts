@@ -58,18 +58,18 @@ test('locale synchronization keeps settings draft and English discard dialog nev
   await login(page);
   await page.goto('/settings');
   await page.getByRole('button',{name:'编辑策略',exact:true}).click();
-  await page.getByRole('button',{name:'4小时',exact:true}).click();
+  await page.getByRole('group',{name:'默认最大运行时间',exact:true}).getByRole('button',{name:'4小时',exact:true}).click();
   let patches=0;
   page.on('request',r=>{if(r.method()==='PATCH')patches++;});
   await page.evaluate(()=>{
     localStorage.setItem('gpupm.locale','en-US');
     window.dispatchEvent(new StorageEvent('storage',{key:'gpupm.locale',newValue:'en-US'}));
   });
-  await expect(page.getByRole('spinbutton',{name:'Hours',exact:true})).toHaveValue('4');
+  await expect(page.getByRole('group',{name:'Default maximum runtime',exact:true}).getByRole('spinbutton',{name:'Hours',exact:true})).toHaveValue('4');
   await page.getByRole('button',{name:'Cancel',exact:true}).click();
   await expect(page.getByRole('button',{name:'Continue editing',exact:true})).toBeVisible();
   await page.getByRole('button',{name:'Continue editing',exact:true}).click();
-  await expect(page.getByRole('spinbutton',{name:'Hours',exact:true})).toHaveValue('4');
+  await expect(page.getByRole('group',{name:'Default maximum runtime',exact:true}).getByRole('spinbutton',{name:'Hours',exact:true})).toHaveValue('4');
   await page.getByRole('button',{name:'Cancel',exact:true}).click();
   await page.getByRole('button',{name:'Discard changes',exact:true}).click();
   await expect(page.getByRole('dialog')).toHaveCount(0);

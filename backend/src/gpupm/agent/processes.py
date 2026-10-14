@@ -140,9 +140,19 @@ def collect():
                 evidence="NVML + procfs" if process.pid in usage else "confirmed descendant",
             )
             if proc_identity(process.pid) != identity or process.ppid() != info["ppid"]:
+                errors.append(
+                    dict(
+                        code="process_collection_incomplete",
+                        pid=process.pid,
+                        message="identity or parent changed during collection",
+                    )
+                )
                 continue
             processes.append(item)
-        except (psutil.Error, OSError, ValueError):
+        except (psutil.NoSuchProcess, ProcessLookupError, FileNotFoundError):
+            continue
+        except (psutil.Error, OSError, ValueError) as exc:
+            errors.append(dict(code="process_collection_incomplete", pid=process.pid, message=str(exc)))
             continue
     return gpus, processes, errors
 
@@ -271,6 +281,7 @@ def group_processes(processes, previous, excluded=()):
         )
     for task in tasks:
         leaders = task.get("leader_identities", [])
+        task["leaders_present"] = any(identity_key(i) in by_key for i in leaders)
         task["orphan_cleanup_due"] = bool(
             task["members"]
             and leaders
@@ -324,7 +335,7 @@ def group_processes(processes, previous, excluded=()):
     return tasks
 
 
-def signal_identity(identity, sig, protected_uids=()):
+def signal_identity(identity, sig, protected_uids=(), *, expected_uid=None, human_check=None):
     import signal
 
     if not hasattr(os, "pidfd_open") or not hasattr(signal, "pidfd_send_signal"):
@@ -346,6 +357,11 @@ def signal_identity(identity, sig, protected_uids=()):
             return "protected"
         if proc_identity(identity["pid"]) != identity:
             return "identity_changed"
+        current_uid = process.uids().real
+        if (expected_uid is not None and current_uid != expected_uid) or (
+            human_check is not None and not human_check(current_uid)
+        ):
+            return "scope_changed"
         signal.pidfd_send_signal(fd, sig)
         return "signaled"
     except (ProcessLookupError, psutil.NoSuchProcess, FileNotFoundError):
@@ -368,3 +384,56 @@ def process_state(identity):
         return "exited"
     except (OSError, ValueError, psutil.Error):
         return "unavailable"
+
+
+def residual_ready(task, now):
+    leaders = task.get("leader_identities", [])
+    if not leaders or not all(valid_leader_identity(i) for i in leaders):
+        return False
+    since = parse_time(task.get("finalizing_since"))
+    return bool(
+        task.get("members")
+        and since
+        and task.get("leader_identities")
+        and not task.get("leaders_present", False)
+        and task.get("orphan_reminder", True)
+        and (now - since).total_seconds() >= task.get("orphan_wait_seconds", 300)
+        and task.get("is_human")
+        and not task.get("protected")
+        and not any(m.get("gpu_memory") for m in task["members"])
+        and not any(i in [m["identity"] for m in task["members"]] for i in task.get("leader_identities", []))
+    )
+
+
+def residual_status(task, now, cleaning=False):
+    leaders = task.get("leader_identities", [])
+    if not task["members"]:
+        task.update(status="finished", finalizing_since=None, orphan_remaining_seconds=None)
+    elif (
+        not leaders
+        or task.get("leaders_present", False)
+        or any(i in [m["identity"] for m in task["members"]] for i in leaders)
+    ):
+        task.update(status="running", finalizing_since=None, orphan_remaining_seconds=None)
+    else:
+        task["finalizing_since"] = task.get("finalizing_since") or now.isoformat()
+        task["orphan_remaining_seconds"] = max(
+            0,
+            task.get("orphan_wait_seconds", 300)
+            - int((now - parse_time(task["finalizing_since"])).total_seconds()),
+        )
+        task["status"] = (
+            "cleaning" if cleaning else ("awaiting_cleanup" if residual_ready(task, now) else "finalizing")
+        )
+
+
+def valid_leader_identity(identity):
+    return bool(
+        isinstance(identity, dict)
+        and isinstance(identity.get("boot_id"), str)
+        and identity["boot_id"]
+        and type(identity.get("pid")) is int
+        and identity["pid"] > 1
+        and type(identity.get("start_ticks")) is int
+        and identity["start_ticks"] >= 0
+    )

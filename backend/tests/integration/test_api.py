@@ -509,3 +509,62 @@ def test_task_template_api_rejects_invalid_parameters(client, field, value):
     response = client.patch("/api/settings", json={field: value}, headers=headers)
     assert response.status_code == 422, response.text
     assert client.get("/api/settings").json() == before
+
+
+def test_residual_api_defaults_active_filter_and_strict_fields(client):
+    headers = login(client)
+    settings = client.get("/api/settings").json()
+    assert settings["default_orphan_reminder"] is True
+    assert settings["default_orphan_wait_seconds"] == 300
+    tasks = client.get("/api/tasks?status=active").json()["items"]
+    assert tasks
+    task = tasks[0]
+    assert task["orphan_reminder"] is True
+    assert task["orphan_wait_seconds"] == 300
+    assert client.get("/api/overview").json()["awaiting_cleanup_count"] == 0
+    for field, value in [
+        ("orphan_reminder", "true"),
+        ("orphan_wait_seconds", True),
+        ("orphan_wait_seconds", 0),
+        ("orphan_wait_seconds", 86401),
+        ("orphan_wait_seconds", None),
+    ]:
+        response = client.patch(
+            f"/api/tasks/{task['id']}", json={"revision": task["revision"], field: value}, headers=headers
+        )
+        assert response.status_code == 422
+        response = client.patch("/api/settings", json={f"default_{field}": value}, headers=headers)
+        assert response.status_code == 422
+    response = client.post(
+        f"/api/tasks/{task['id']}/termination-preview", json={"residual_only": True}, headers=headers
+    )
+    assert response.status_code == 409
+
+
+def test_stale_awaiting_cleanup_task_detail_and_list_block_preview(client, app, monkeypatch):
+    headers = login(client)
+    original = app.state.ctx.agent.call
+
+    def call(method, params=None):
+        result = original(method, params)
+        if method == "snapshot":
+            result["stale"] = True
+            task = result["tasks"][0]
+            task["status"] = "awaiting_cleanup"
+            task["finalizing_since"] = "2026-01-01T00:00:00+00:00"
+        return result
+
+    monkeypatch.setattr(app.state.ctx.agent, "call", call)
+    app.state.ctx.invalidate()
+    payload = client.get("/api/tasks?status=awaiting_cleanup").json()
+    assert payload["stale"] is True
+    task = payload["items"][0]
+    assert task["stale"] is True
+    detail = client.get(f"/api/tasks/{task['id']}").json()
+    assert detail["stale"] is True
+    assert detail["status"] == "awaiting_cleanup"
+    response = client.post(
+        f"/api/tasks/{task['id']}/termination-preview", json={"residual_only": True}, headers=headers
+    )
+    assert response.status_code == 409
+    assert response.json()["detail"]["code"] == "stale_snapshot"

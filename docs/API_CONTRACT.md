@@ -58,6 +58,16 @@ GET /api/tasks、/api/system-users、/api/users 支持 scope=human|other|all，�
 
 ## New task defaults
 
-The five default task fields form a template copied when a task ID is first discovered. Fresh settings use max_runtime_seconds=1800, protected=false, priority=50, deadline_action=notify and cleanup_orphans=false. Runtime is measured from process startup, including time before discovery. Changing defaults does not overwrite existing task policies, including across agent restarts; individual task overrides remain available. Native system/service/maintenance protection and current human membership checks still take precedence.
+The default task fields form a template copied when a task ID is first discovered. Fresh settings use max_runtime_seconds=1800, protected=false, priority=50, deadline_action=notify and cleanup_orphans=false. Runtime is measured from process startup, including time before discovery. Changing defaults does not overwrite existing task policies, including across agent restarts; individual task overrides remain available. Native system/service/maintenance protection and current human membership checks still take precedence.
 
 Existing settings JSON is filled with missing keys only; explicit null and existing values are retained. PATCH /settings accepts strict booleans for default_task_protected/default_cleanup_orphans, a strict integer 0–100 for default_task_priority, and null or a strict integer 1–315360000 seconds for default_max_runtime_seconds. Readonly initialization paths/mode cannot be changed.
+
+## Finalization and manual residual cleanup
+
+Task status adds `finalizing`, `awaiting_cleanup`, and `cleaning`. `status=active` includes these and `running`, excluding `finished`. Overview includes `awaiting_cleanup_count`. A task can naturally finish from either finalization/reminder state without intervention.
+
+Task policy adds strict `orphan_reminder` boolean and strict `orphan_wait_seconds` integer (1–86400); settings use `default_orphan_reminder` (true) and `default_orphan_wait_seconds` (300). Missing values are filled without replacing other existing task policies. Task responses expose `finalizing_since`, `orphan_remaining_seconds`, and `stale` (including task detail). The wait starts at the first complete observation of leader exit, persists across restart, and resets on leader return/finish. Incomplete collection holds the previous state and disables destructive actions.
+
+`POST /tasks/{id}/termination-preview` accepts `residual_only:true`. The preview token binds this intent and the exact eligible confirmed members. Residual cleanup requires elapsed wait, enabled reminders, absent leader, no GPU members, current personnel ownership and no protection. The existing terminate request submits that token, reason and idempotency key. Execute and queued signals revalidate conditions and identity; a changed scope rejects/skips rather than widening targets. The preview exposes eligible commands/process identities and exclusions for administrator confirmation.
+
+Legacy `cleanup_orphans` / `default_cleanup_orphans` remain compatible fields, but no longer trigger automatic residual cleanup. Finalizing workers are excluded from automatic deadline termination as well. Ordinary running-task deadline policies remain available. Residual reminders are displayed in the web overview, task list and detail; they do not send external messages or infer safe-to-kill from lack of GPU usage.

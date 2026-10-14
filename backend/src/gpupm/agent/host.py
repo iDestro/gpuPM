@@ -21,6 +21,9 @@ from gpupm.agent.processes import (
     shell_process,
     signal_identity,
     process_state,
+    residual_ready,
+    residual_status,
+    valid_leader_identity,
 )
 from gpupm.domain.rules import deadline, parse_time, utcnow
 from gpupm.domain.settings import DEFAULT_SETTINGS, task_defaults
@@ -101,6 +104,7 @@ class AgentService:
                             task.pop("cleanup_handled_revision", None)
                             task["recovery_attempt"] = task.get("recovery_attempt", 0) + 1
                     self.event(state, {}, "task.terminate", job["id"], None, job, "interrupted")
+            self.normalize_cleanup_status(state)
             self.save(db, state)
 
     def runtime_setting(self, key, default):
@@ -181,7 +185,18 @@ class AgentService:
             )
         )
 
+    def normalize_cleanup_status(self, state):
+        active = {
+            j.get("task_id")
+            for j in state["jobs"].values()
+            if j.get("residual_only") and j["status"] in {"queued", "running"}
+        }
+        for task in state["tasks"]:
+            if task["status"] == "cleaning" and task["id"] not in active:
+                task["status"] = "finalizing"
+
     def refresh(self, state):
+        self.normalize_cleanup_status(state)
         try:
             gpus, processes, errors = self.collector()
         except Exception as exc:
@@ -193,12 +208,25 @@ class AgentService:
         state["gpus"] = gpus
         state["errors"] = errors
         state["stale"] = bool(errors)
+        if errors:
+            return
         old_ids = {t["id"] for t in state["tasks"]}
-        state["tasks"] = group_processes(processes, state["tasks"], state["excluded"])
+        try:
+            if any(
+                not valid_leader_identity(i) for t in state["tasks"] for i in t.get("leader_identities", [])
+            ):
+                raise ValueError("invalid persisted leader identity")
+            state["tasks"] = group_processes(processes, state["tasks"], state["excluded"])
+        except (KeyError, TypeError, ValueError) as exc:
+            state["errors"] = [dict(code="membership_collection_incomplete", message=str(exc))]
+            state["stale"] = True
+            return
         for task in state["tasks"]:
             if task["id"] not in old_ids:
                 task.update(task_defaults(state["settings"]))
         for task in state["tasks"]:
+            for field in ("orphan_reminder", "orphan_wait_seconds"):
+                task.setdefault(field, task_defaults(state["settings"])[field])
             task["is_human"] = self.accounts.is_human(task["uid"])
             protected_uids = {0, self.config.get("api_uid")}
             if (
@@ -207,6 +235,16 @@ class AgentService:
                 or task["uid"] < 1000
             ):
                 task["protected"] = True
+            residual_status(
+                task,
+                utcnow(),
+                any(
+                    j.get("residual_only")
+                    and j.get("task_id") == task["id"]
+                    and j["status"] in {"queued", "running"}
+                    for j in state["jobs"].values()
+                ),
+            )
             task["memory_used"] = sum(
                 v for p in task["members"] for v in p["gpu_memory"].values() if v is not None
             )
@@ -292,17 +330,21 @@ class AgentService:
         if not self.accounts.is_human(task["uid"]):
             raise DomainError("non_human_readonly", "only human tasks are editable", 403)
 
-    def targets(self, task, identity=None):
+    def targets(self, task, identity=None, residual_only=False):
         self.require_human_task(task)
         if task["protected"] or task["status"] == "finished":
             raise DomainError("protected", "task protected or finished", 403)
+        if residual_only and not residual_ready(task, utcnow()):
+            raise DomainError("residual_not_ready", "residual cleanup conditions changed", 409)
         targets = []
         excluded = []
         for member in task["members"]:
             if identity and member["identity"] != identity:
                 continue
             if (
-                member["uid"] < 1000
+                member["uid"] != task["uid"]
+                or not self.accounts.is_human(member["uid"])
+                or member["uid"] < 1000
                 or member["uid"] == self.config.get("api_uid")
                 or member["username"] in self.config.get("maintenance_users", [])
                 or shell_process(member)
@@ -310,7 +352,7 @@ class AgentService:
                 excluded.append(dict(identity=member["identity"], reason="protected"))
             elif member["status"] in {"zombie", "Z"}:
                 excluded.append(dict(identity=member["identity"], reason="zombie; parent must reap"))
-            elif member["ppid"] == 1 and not task.get("cleanup_orphans"):
+            elif member["ppid"] == 1 and not (residual_only or task.get("cleanup_orphans")):
                 excluded.append(dict(identity=member["identity"], reason="orphan cleanup not authorized"))
             else:
                 targets.append(member)
@@ -383,7 +425,7 @@ class AgentService:
                 or not 1 <= settings["default_max_runtime_seconds"] <= 315360000
             ):
                 raise DomainError("invalid_settings", "maximum runtime must be positive or null", 422)
-            for field in ("default_task_protected", "default_cleanup_orphans"):
+            for field in ("default_task_protected", "default_cleanup_orphans", "default_orphan_reminder"):
                 if field in settings and type(settings[field]) is not bool:
                     raise DomainError("invalid_settings", "task defaults require booleans", 422)
             if "default_task_priority" in settings and (
@@ -391,6 +433,11 @@ class AgentService:
                 or not 0 <= settings["default_task_priority"] <= 100
             ):
                 raise DomainError("invalid_settings", "task priority must be an integer from 0 to 100", 422)
+            if "default_orphan_wait_seconds" in settings and (
+                type(settings["default_orphan_wait_seconds"]) is not int
+                or not 1 <= settings["default_orphan_wait_seconds"] <= 86400
+            ):
+                raise DomainError("invalid_settings", "orphan wait must be an integer 1..86400", 422)
             merged = dict(state["settings"], **settings)
             warning = merged.get("warning_percent", 80)
             critical = merged.get("critical_percent", 90)
@@ -438,6 +485,8 @@ class AgentService:
                 "max_runtime_seconds",
                 "deadline_action",
                 "cleanup_orphans",
+                "orphan_reminder",
+                "orphan_wait_seconds",
             }
             if set(policy) - fields:
                 raise DomainError("invalid_policy", "unsupported task policy fields", 422)
@@ -447,6 +496,13 @@ class AgentService:
                 raise DomainError("invalid_policy", "priority 0..100 required", 422)
             if policy.get("deadline_action", "notify") not in {"notify", "terminate"}:
                 raise DomainError("invalid_policy", "deadline action invalid", 422)
+            if "orphan_reminder" in policy and type(policy["orphan_reminder"]) is not bool:
+                raise DomainError("invalid_policy", "orphan reminder must be boolean", 422)
+            if "orphan_wait_seconds" in policy and (
+                type(policy["orphan_wait_seconds"]) is not int
+                or not 1 <= policy["orphan_wait_seconds"] <= 86400
+            ):
+                raise DomainError("invalid_policy", "orphan wait must be an integer 1..86400", 422)
             deadline(
                 parse_time(task["started_at"]),
                 policy.get("max_runtime_seconds", task["max_runtime_seconds"]),
@@ -517,8 +573,10 @@ class AgentService:
             if state.get("stale", True):
                 raise DomainError("stale_collection", "fresh complete process collection required", 503)
             task = self.find(state, "tasks", p["task_id"])
-            targets, excluded = self.targets(task, p.get("identity"))
+            targets, excluded = self.targets(task, p.get("identity"), p.get("residual_only", False))
             value = self.preview(state, "task", task, "terminate", targets=targets, excluded=excluded)
+            value["residual_only"] = p.get("residual_only", False)
+            state["previews"][value["token"]]["residual_only"] = value["residual_only"]
             value["task_id"] = task["id"]
             return value
         if method == "execute_termination":
@@ -540,9 +598,9 @@ class AgentService:
             if p.get("task_id", task["id"]) != task["id"]:
                 raise DomainError("scope_changed", "termination token belongs to another task")
             checked = self.checked(state, p, "task", task, "terminate")
-            targets, _ = self.targets(task)
-            if not {identity_key(m["identity"]) for m in checked["targets"]} <= {
-                identity_key(m["identity"]) for m in targets
+            targets, _ = self.targets(task, residual_only=checked.get("residual_only", False))
+            if not {(identity_key(m["identity"]), m["uid"]) for m in checked["targets"]} <= {
+                (identity_key(m["identity"]), m["uid"]) for m in targets
             }:
                 raise DomainError("scope_changed", "signal scope changed")
             job = dict(
@@ -555,8 +613,11 @@ class AgentService:
                 targets=checked["targets"],
                 task_id=task["id"],
                 task_revision=task["revision"],
+                residual_only=checked.get("residual_only", False),
                 actor=p.get("actor", "system"),
             )
+            if job["residual_only"]:
+                task["status"] = "cleaning"
             state["jobs"][job["id"]] = job
             state["idempotency"][key] = dict(id=job["id"], token=p["token"])
             del state["previews"][p["token"]]
@@ -740,6 +801,18 @@ class AgentService:
             dict(id=group["id"], status="deleted"),
         )
 
+    def signal_member(self, member, sig):
+        protected = {self.config.get("api_uid")} - {None}
+        if self.signaler is signal_identity:
+            return self.signaler(
+                member["identity"],
+                sig,
+                protected,
+                expected_uid=member["uid"],
+                human_check=self.accounts.is_human,
+            )
+        return self.signaler(member["identity"], sig, protected)
+
     def execute_job(self, ident):
         try:
             with self.lock, self.database() as db:
@@ -758,16 +831,30 @@ class AgentService:
                     state = self.load(db)
                     job = state["jobs"][ident]
                     task = self.find(state, "tasks", job["task_id"])
+                    residual_valid = True
+                    if job.get("residual_only") or job.get("actor") == "policy":
+                        self.refresh(state)
+                        task = self.find(state, "tasks", job["task_id"])
+                        try:
+                            eligible, _ = self.targets(task, residual_only=job.get("residual_only", False))
+                            residual_valid = not state.get("stale", True) and any(
+                                m["identity"] == member["identity"] and m["uid"] == member["uid"]
+                                for m in eligible
+                            )
+                        except DomainError:
+                            residual_valid = False
                     if not self.accounts.is_human(task["uid"]) or not self.accounts.is_human(member["uid"]):
                         job["human_scope_revoked"] = True
                     if (
-                        task["protected"]
+                        not residual_valid
+                        or task["protected"]
                         or job.get("human_scope_revoked")
                         or task["revision"] != job["task_revision"]
                         or (
                             job.get("actor") == "policy"
                             and (
-                                task["policy_status"] != "applied"
+                                task["status"] != "running"
+                                or task["policy_status"] != "applied"
                                 or not state.get("last_heartbeat")
                                 or (utcnow() - parse_time(state["last_heartbeat"])).total_seconds()
                                 > self.policy_freshness(state)
@@ -778,9 +865,7 @@ class AgentService:
                         status = "scope_changed"
                     else:
                         try:
-                            status = self.signaler(
-                                member["identity"], signal.SIGTERM, {self.config.get("api_uid")} - {None}
-                            )
+                            status = self.signal_member(member, signal.SIGTERM)
                         except Exception as exc:
                             status = "error: " + str(exc)
                     results.append(dict(identity=member["identity"], term=status))
@@ -795,16 +880,30 @@ class AgentService:
                     state = self.load(db)
                     job = state["jobs"][ident]
                     task = self.find(state, "tasks", job["task_id"])
+                    residual_valid = True
+                    if job.get("residual_only") or job.get("actor") == "policy":
+                        self.refresh(state)
+                        task = self.find(state, "tasks", job["task_id"])
+                        try:
+                            eligible, _ = self.targets(task, residual_only=job.get("residual_only", False))
+                            residual_valid = not state.get("stale", True) and any(
+                                m["identity"] == member["identity"] and m["uid"] == member["uid"]
+                                for m in eligible
+                            )
+                        except DomainError:
+                            residual_valid = False
                     if not self.accounts.is_human(task["uid"]) or not self.accounts.is_human(member["uid"]):
                         job["human_scope_revoked"] = True
                     if (
-                        task["protected"]
+                        not residual_valid
+                        or task["protected"]
                         or job.get("human_scope_revoked")
                         or task["revision"] != job["task_revision"]
                         or (
                             job.get("actor") == "policy"
                             and (
-                                task["policy_status"] != "applied"
+                                task["status"] != "running"
+                                or task["policy_status"] != "applied"
                                 or not state.get("last_heartbeat")
                                 or (utcnow() - parse_time(state["last_heartbeat"])).total_seconds()
                                 > self.policy_freshness(state)
@@ -815,9 +914,7 @@ class AgentService:
                         result["kill"] = "scope_changed"
                     else:
                         try:
-                            result["kill"] = self.signaler(
-                                member["identity"], signal.SIGKILL, {self.config.get("api_uid")} - {None}
-                            )
+                            result["kill"] = self.signal_member(member, signal.SIGKILL)
                         except Exception as exc:
                             result["kill"] = "error: " + str(exc)
                     job["results"] = copy.deepcopy(results)
@@ -842,6 +939,8 @@ class AgentService:
                 else:
                     status = "partial"
                 job["status"] = status
+                if job.get("residual_only"):
+                    self.refresh(state)
                 self.event(state, job, "task.terminate", job["task_id"], None, job, status)
                 self.save(db, state)
         finally:
@@ -918,45 +1017,8 @@ class AgentService:
                             self.event(state, {}, "account.expiry", account["id"], None, account)
             pending = []
             for task in state["tasks"]:
-                fresh = bool(
-                    state.get("last_heartbeat")
-                    and (utcnow() - parse_time(state["last_heartbeat"])).total_seconds()
-                    <= self.policy_freshness(state)
-                    and task.get("confirmed_revision") == task["revision"]
-                )
                 if (
-                    self.config.get("allow_mutations")
-                    and not state["errors"]
-                    and fresh
-                    and not task["protected"]
-                    and self.accounts.is_human(task["uid"])
-                    and task["policy_status"] == "applied"
-                    and task.get("cleanup_orphans")
-                    and task.get("orphan_cleanup_due")
-                    and task.get("cleanup_handled_revision") != task["revision"]
-                ):
-                    targets, excluded = self.targets(task)
-                    if targets:
-                        preview = self.preview(
-                            state, "task", task, "terminate", targets=targets, excluded=excluded
-                        )
-                        pending.append(
-                            dict(
-                                token=preview["token"],
-                                reason="confirmed policy orphan cleanup",
-                                idempotency_key="cleanup:"
-                                + task["id"]
-                                + ":"
-                                + str(task["revision"])
-                                + ":"
-                                + str(task.get("recovery_attempt", 0)),
-                                actor="policy",
-                            )
-                        )
-                        task["cleanup_handled_revision"] = task["revision"]
-            for task in state["tasks"]:
-                if (
-                    task.get("cleanup_handled_revision") == task["revision"]
+                    task["status"] != "running"
                     or not task["overdue"]
                     or task["protected"]
                     or not self.accounts.is_human(task["uid"])

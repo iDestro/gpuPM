@@ -17,7 +17,7 @@ import {
   Tooltip,
 } from "antd";
 import { useMutation, useQuery } from "@tanstack/react-query";
-import { api, ApiError, date, queryClient } from "./api";
+import { api, ApiError, date, duration, queryClient } from "./api";
 import { translate, useI18n } from "./i18n";
 import { termFor } from "./glossary";
 export type Row = Record<string, any>;
@@ -66,7 +66,7 @@ export function CompactText({ value, tooltip }: { value: unknown; tooltip?: stri
   return <Tooltip title={tooltip ?? text} trigger={["hover", "focus"]}><span className="compact-text" title={tooltip ?? text} tabIndex={0}>{text}</span></Tooltip>;
 }
 const statusLabels: Record<string, string> = {
-  running: "运行中", finished: "已结束", overdue: "已超时", anomaly: "有异常", active: "正常", succeeded: "成功", completed: "已完成",
+  running: "运行中", finalizing: "收尾中", awaiting_cleanup: "待清理", cleaning: "清理中", finished: "已结束", overdue: "已超时", anomaly: "有异常", active: "正常", succeeded: "成功", completed: "已完成",
   success: "成功", pending: "等待中", disabled: "已停用", expired: "已到期",
   failed: "失败", failure: "失败", deleted: "已软删除", error: "错误",
   terminated: "已终止", unavailable: "不可用", available: "可用", partial: "部分完成",
@@ -81,6 +81,7 @@ export function Status({ value }: { value: any }) {
   useI18n();
   const colors: Record<string, string> = {
     running: "green",
+    finalizing: "blue", awaiting_cleanup: "orange", cleaning: "blue",
     active: "green",
     succeeded: "green",
     completed: "green",
@@ -93,7 +94,7 @@ export function Status({ value }: { value: any }) {
     deleted: "red",
     error: "red",
   };
-  return <Tag className="status-tag" color={colors[value]} title={value == null ? undefined : String(value)}>{statusLabel(value)}</Tag>;
+  return <Tag className="status-tag" color={colors[value]} title={value == null ? undefined : String(value)}>{Object.prototype.hasOwnProperty.call(statusLabels, value) ? <TermLabel label={statusLabels[value]} /> : statusLabel(value)}</Tag>;
 }
 export function Source({ data }: { data: any }) {
   const { t } = useI18n();
@@ -142,20 +143,20 @@ function runtimeSeconds(value: RuntimeValue = {}) {
     ? null
     : (value.hours ?? 0) * 3600 + (value.minutes ?? 0) * 60 + (value.seconds ?? 0);
 }
-function RuntimeInput({ value = {}, onChange, id, disabled }: {
-  value?: RuntimeValue; onChange?: (value: RuntimeValue) => void; id?: string; disabled?: boolean;
+function RuntimeInput({ value = {}, onChange, id, disabled, label, required, min = 1, max = 315360000 }: {
+  value?: RuntimeValue; onChange?: (value: RuntimeValue) => void; id?: string; disabled?: boolean; label: string; required?: boolean; min?: number; max?: number;
 }) {
   const { t } = useI18n();
   const current = runtimeSeconds(value);
-  return <Space direction="vertical" style={{ width: "100%" }}>
+  return <Space role="group" aria-label={t(label)} direction="vertical" style={{ width: "100%" }}>
     <Space wrap>
       {(["hours", "minutes", "seconds"] as const).map((unit, index) => <InputNumber
         key={unit}
         id={index === 0 ? id : `${id}-${unit}`}
         aria-label={t(["小时", "分钟", "秒"][index])}
-        addonAfter={t(["时", "分", "秒"][index])}
+        addonAfter={t(["时", "分", "s"][index])}
         min={0}
-        max={index === 0 ? 87600 : 59}
+        max={index === 0 ? Math.floor(max / 3600) : 59}
         precision={0}
         value={value[unit] ?? null}
         onChange={(part) => onChange?.({ ...value, [unit]: part })}
@@ -164,7 +165,7 @@ function RuntimeInput({ value = {}, onChange, id, disabled }: {
       />)}
     </Space>
     <Space wrap size={6}>
-      {([["30秒", 30], ["1分钟", 60], ["30分钟", 1800], ["1小时", 3600], ["4小时", 14400], ["24小时", 86400], ["不限时", null]] as const).map(([label, seconds]) => <Button
+      {([["30秒", 30], ["1分钟", 60], ["30分钟", 1800], ["1小时", 3600], ["4小时", 14400], ["24小时", 86400], ["不限时", null]] as const).filter(([, seconds]) => seconds == null ? !required : seconds >= min && seconds <= max).map(([label, seconds]) => <Button
         key={label}
         size="small"
         type={current === seconds ? "primary" : "default"}
@@ -286,14 +287,15 @@ export function EditDialog({
                 const seconds = runtimeSeconds(value);
                 if (Object.values(value).some((part) => part != null && (!Number.isInteger(part) || part < 0)) ||
                     (value.minutes ?? 0) > 59 || (value.seconds ?? 0) > 59 ||
-                    (seconds != null && (seconds < 1 || seconds > 315360000))) {
-                  throw new Error(t("运行时间需为1秒至87600小时；不限时请清空"));
+                    (f.required && seconds == null) ||
+                    (seconds != null && (seconds < (f.min ?? 1) || seconds > (f.max ?? 315360000)))) {
+                  throw new Error(t(f.required ? "残留等待时间需为1秒至24小时" : "运行时间需为1秒至87600小时；不限时请清空"));
                 }
               } }] : []),
             ]}
           >
             {f.type === "duration" ? (
-              <RuntimeInput disabled={f.disabled} />
+              <RuntimeInput disabled={f.disabled} label={f.label} required={f.required} min={f.min} max={f.max} />
             ) : f.type === "number" ? (
               <InputNumber
                 min={f.min}
@@ -408,6 +410,8 @@ export function PreviewDialog({
       open
       title={t(title)}
       width={760}
+      centered
+      styles={{ body: { maxHeight: "calc(100dvh - 240px)", overflowY: "auto" } }}
       onCancel={onClose}
       footer={
         result ? (
@@ -454,13 +458,17 @@ export function PreviewDialog({
                 String(r.pid ?? r.id ?? JSON.stringify(r.identity))
               }
               dataSource={preview.data.targets}
+              tableLayout="fixed"
+              scroll={{ x: 800 }}
               columns={[
-                { title: <TermLabel label="PID" />, dataIndex: "pid" },
-                { title: <TermLabel label="命令" />, dataIndex: "command" },
+                { title: <TermLabel label="PID" />, dataIndex: "pid", width: 90 },
+                { title: <TermLabel label="命令" />, dataIndex: "command", width: 260, render: (value) => <CompactText value={value} /> },
+                { title: <TermLabel label="运行时间" />, width: 150, render: (_, r) => r.create_time ? duration(Math.max(0, Math.floor((Date.now() - new Date(r.create_time).getTime()) / 1000))) : "—" },
                 {
                   title: <TermLabel label="身份" />,
                   dataIndex: "identity",
-                  render: (v) => JSON.stringify(v),
+                  width: 300,
+                  render: (v) => <CompactText value={v} />,
                 },
               ]}
             />
@@ -505,10 +513,12 @@ export function PreviewDialog({
 export function TerminationDialog({
   task,
   identity,
+  residualOnly = false,
   onClose,
 }: {
   task: Row;
   identity?: Row;
+  residualOnly?: boolean;
   onClose: () => void;
 }) {
   const [key] = useState(() => crypto.randomUUID());
@@ -517,7 +527,7 @@ export function TerminationDialog({
       title="终止范围预览"
       previewPath={`/tasks/${encodeURIComponent(task.id)}/termination-preview`}
       executePath={`/tasks/${encodeURIComponent(task.id)}/terminate`}
-      previewBody={identity ? { identity } : {}}
+      previewBody={residualOnly ? { residual_only: true } : identity ? { identity } : {}}
       executeBody={{ idempotency_key: key }}
       onClose={onClose}
       warning="SIGTERM 后等待正常退出，必要时 SIGKILL。只处理预览范围，受保护与身份变化由服务端阻止。僵尸进程需要父进程回收。"
@@ -530,7 +540,7 @@ export function Operation({ id }: { id: string }) {
     queryKey: ["operation", id],
     queryFn: () => api(`/operations/${encodeURIComponent(id)}`),
     refetchInterval: (query) =>
-      ["pending", "running"].includes(query.state.data?.status) ? 1000 : false,
+      ["pending", "queued", "running"].includes(query.state.data?.status) ? 1000 : false,
     refetchIntervalInBackground: false,
     retry: false,
   });

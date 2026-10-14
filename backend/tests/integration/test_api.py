@@ -386,3 +386,35 @@ def test_other_business_and_task_policy_rejected_before_persistence(client, app)
         client.post(f"/api/tasks/{task['id']}/termination-preview", json={}, headers=headers).status_code
         == 403
     )
+
+
+def test_web_created_account_is_automatically_managed_human(client):
+    headers = login(client)
+    response = client.post(
+        "/api/system-users",
+        json={
+            "username": "managedcheck",
+            "password": "Strong-user-pass-42",
+            "require_password_change": False,
+        },
+        headers=headers,
+    )
+    assert response.status_code == 200, response.text
+    account = response.json()
+    assert account["managed"] is True and account["is_human"] is True
+    assert "human" in account["groups"]
+    assert account["primary_group"] == "managedcheck"
+    assert account["shell"] == "/bin/bash"
+    assert account["home"] == "/home/managedcheck"
+    assert account["data_dir"] == "/data/managedcheck"
+    assert any(a["id"] == account["id"] for a in client.get("/api/system-users").json())
+    params = {"action": "update", "revision": account["revision"], "changes": {"notes": "already managed"}}
+    preview = client.post(f"/api/system-users/{account['id']}/change-preview", json=params, headers=headers)
+    assert preview.status_code == 200, preview.text
+    updated = client.patch(
+        f"/api/system-users/{account['id']}",
+        json={"revision": account["revision"], "token": preview.json()["token"], "notes": "already managed"},
+        headers=headers,
+    )
+    assert updated.status_code == 200, updated.text
+    assert updated.json()["managed"] is True

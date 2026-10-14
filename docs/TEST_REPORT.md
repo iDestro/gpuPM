@@ -64,3 +64,12 @@ SQLite 备份回归验证提交的 WAL 数据被包含、未提交数据不被�
 - 当前实机没有非 human GPU 占用任务；该类禁止修改及撤销信号路径由自动化回归覆盖。未为此启动系统账号的GPU负载。
 
 界面默认状态增量回归：27项前端测试及4条Chrome流程通过，覆盖默认 scope=human/status=running、切换已结束后隐藏运行任务、切回运行中及人员/其他账号文案。生产构建通过，服务器两个入口的新包 index-Du-YVC4A.js 已核验。
+
+
+## 新建账号自动管理专项核验
+
+新增完整 API 回归：不提交 groups/managed 字段创建账号，响应即 managed=true/is_human=true，human 附属组、同名私人主组、bash 和 home/data 路径均正确；默认人员列表可见，直接预览修改备注并执行成功，无需额外接管。专项 API 1项通过，现有创建/human相关13项回归通过。
+
+服务器以只读方式核对原 QA agent 实例中的12个创建账号：managed=true、human成员、同名私人主组、主/数据目录0700且属主正确、~/data链接正确、.bashrc包含umask077。未新增/修改任何真实账号。
+
+管理标记归属于创建该账号的 agent 管理库。QA验收实例 /var/lib/gpupm-qa/state.sqlite 与试用实例 /var/lib/gpupm-trial/agent/agent.db 独立，因此历史 QA 账号在试用 Web 中不自动视为已管理；human成员身份仅划定人员范围，不会自动纳管其他实例或服务器既有账号。

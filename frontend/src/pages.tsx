@@ -62,11 +62,6 @@ const taskFields: Field[] = [
     help: "从任务启动时刻计算；留空或点击“不限时”可取消时限",
   },
   {
-    name: "expires_at",
-    label: "指定到期时间 · Asia/Shanghai",
-    type: "datetime",
-  },
-  {
     name: "deadline_action",
     label: "到期动作",
     type: "select",
@@ -543,7 +538,7 @@ export function TaskDetail() {
                 保护状态: d.protected ? "已保护" : "未保护",
                 运行时间: duration(d.runtime_seconds),
                 剩余时间: duration(d.remaining_seconds),
-                到期时间: date(d.deadline_at),
+                预计结束时间: date(d.deadline_at),
                 到期策略: d.deadline_action,
                 策略执行状态: d.policy_status,
                 版本: d.revision,
@@ -634,7 +629,7 @@ export function TaskDetail() {
           fields={taskFields}
           initial={d}
           onClose={() => setEditing(false)}
-          onSave={(v) => save.mutateAsync({ path: `/tasks/${id}`, body: v })}
+          onSave={(v) => save.mutateAsync({ path: `/tasks/${id}`, body: { ...v, expires_at: null } })}
         />
       ) : null}
       {termination && d ? (

@@ -48,8 +48,13 @@ test('task policy edits persist and protected task cannot be terminated',async({
   await page.getByRole('button',{name:'放弃修改'}).click();
   await expect(page.getByRole('dialog')).toHaveCount(0);
   await expect(page.getByText('browser-verified-note')).toBeVisible();
+  const beforeRuntime=await (await page.request.get('/api/tasks/demo-task-2')).json();
+  const me=await (await page.request.get('/api/auth/me')).json();
+  const legacy=await page.request.patch('/api/tasks/demo-task-2',{headers:{'X-CSRF-Token':me.csrf_token},data:{revision:beforeRuntime.revision,expires_at:'2099-01-01T00:00:00Z'}});
+  expect(legacy.ok()).toBe(true);
   await page.goto('/tasks/demo-task-2');
   await page.getByRole('button',{name:'编辑策略'}).click();
+  await expect(page.getByLabel('指定到期时间 · Asia/Shanghai')).toHaveCount(0);
   await expect(page.getByText('从任务启动时刻计算；留空或点击“不限时”可取消时限')).toBeVisible();
   await page.getByRole('button',{name:'24小时',exact:true}).click();
   await expect(page.getByRole('spinbutton',{name:'小时',exact:true})).toHaveValue('24');
@@ -59,6 +64,8 @@ test('task policy edits persist and protected task cannot be terminated',async({
   await expect(page.getByRole('dialog')).toHaveCount(0);
   let task=await (await page.request.get('/api/tasks/demo-task-2')).json();
   expect(task.max_runtime_seconds).toBe(86525);
+  expect(task.expires_at).toBeNull();
+  expect(new Date(task.deadline_at).getTime()).toBe(new Date(task.started_at).getTime()+86525*1000);
   await page.setViewportSize({width:375,height:812});
   await page.getByRole('button',{name:'编辑策略'}).click();
   await expect(page.getByRole('dialog').getByRole('button',{name:'Close',exact:true})).toBeInViewport();

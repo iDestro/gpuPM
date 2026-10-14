@@ -108,3 +108,21 @@ test.each([false,true])('readonly task disables every mutation when human=%s',as
   for(const name of ['终止整个任务','终止进程','拆分所选进程','排除所选归属']) expect(screen.getByRole('button',{name})).toBeDisabled();
   expect(screen.getAllByRole('checkbox').every(input=>(input as HTMLInputElement).disabled)).toBe(true);
 });
+
+test('task editing offers only runtime and clears a legacy absolute expiry on save',async()=>{
+  const {TaskDetail}=await import('./pages');
+  const {Routes,Route}=await import('react-router-dom');
+  setSession({username:'admin',csrf_token:'csrf'});
+  const task={id:'task',name:'sample',priority:50,revision:2,is_human:true,protected:false,members:[],context:[],max_runtime_seconds:3600,expires_at:'2099-01-01T00:00:00Z',deadline_action:'notify',deadline_at:'2026-10-14T04:00:00Z'};
+  const fetch=vi.fn(async(url:string,_options?:RequestInit)=>new Response(JSON.stringify(url.endsWith('/gpus')?{items:[]}:task)));
+  vi.stubGlobal('fetch',fetch);
+  render(<MemoryRouter initialEntries={['/tasks/task']}><QueryClientProvider client={queryClient}><Routes><Route path='/tasks/:id' element={<TaskDetail/>}/></Routes></QueryClientProvider></MemoryRouter>);
+  await userEvent.click(await screen.findByRole('button',{name:'编辑策略'}));
+  expect(screen.queryByLabelText('指定到期时间 · Asia/Shanghai')).not.toBeInTheDocument();
+  expect(screen.getByText('预计结束时间')).toBeInTheDocument();
+  await userEvent.click(screen.getByRole('button',{name:'4小时'}));
+  await userEvent.click(screen.getByRole('button',{name:/保\s*存/}));
+  await waitFor(()=>expect(fetch.mock.calls.some(([,options])=>(options as RequestInit)?.method==='PATCH')).toBe(true));
+  const patch=fetch.mock.calls.find(([,options])=>(options as RequestInit)?.method==='PATCH');
+  expect(JSON.parse(String((patch?.[1] as RequestInit)?.body))).toMatchObject({max_runtime_seconds:14400,expires_at:null,revision:2});
+},10000);

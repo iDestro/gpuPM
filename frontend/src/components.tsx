@@ -51,9 +51,9 @@ export function ErrorAlert({ error }: { error: unknown }) {
 export function JsonView({ value }: { value: unknown }) {
   return <pre className="json-view">{JSON.stringify(value, null, 2)}</pre>;
 }
-export function CompactText({ value }: { value: unknown }) {
+export function CompactText({ value, tooltip }: { value: unknown; tooltip?: string }) {
   const text = value == null || value === "" ? "—" : typeof value === "object" ? JSON.stringify(value) : String(value);
-  return <Tooltip title={text}><span className="compact-text" title={text} tabIndex={0}>{text}</span></Tooltip>;
+  return <Tooltip title={tooltip ?? text} trigger={["hover", "focus"]}><span className="compact-text" title={tooltip ?? text} tabIndex={0}>{text}</span></Tooltip>;
 }
 export const statusLabel = (value: any) => ({
   running: "运行中", finished: "已结束", overdue: "已超时", anomaly: "有异常", active: "正常", succeeded: "成功", completed: "已完成",

@@ -1493,3 +1493,17 @@ def test_nonhuman_expiry_and_account_tick_are_skipped(tmp_path):
     service.tick()
     with service.database() as db:
         assert not service.load(db)["jobs"]
+
+
+def test_task_original_name_survives_alias_refresh_and_finish():
+    tasks = group_processes([process(10, 1, True)], [])
+    assert tasks[0]["original_name"] == "python train.py"
+    tasks[0]["name"] = "模型A训练"
+    refreshed = group_processes([process(10, 1, True)], tasks)
+    assert refreshed[0]["name"] == "模型A训练"
+    assert refreshed[0]["original_name"] == "python train.py"
+    assert group_processes([], refreshed)[0]["original_name"] == "python train.py"
+    del tasks[0]["original_name"]
+    assert group_processes([], tasks)[0]["original_name"] == "python train.py"
+    tasks[0]["members"] = []
+    assert group_processes([], tasks)[0]["original_name"] is None

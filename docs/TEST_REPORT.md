@@ -92,3 +92,11 @@ SQLite 备份回归验证提交的 WAL 数据被包含、未提交数据不被�
 复现修改任务后点击取消或右上角关闭没有确认弹窗：共享EditDialog使用的AntD静态Modal.confirm在React19下失效，改为现有Modal.useModal并渲染contextHolder，无新增依赖。兼容性说明见[AntD官方文档](https://5x-ant-design.antgroup.com/docs/react/v5-for-19)。
 
 35项Vitest、7条Chrome E2E及类型/生产构建通过。新增覆盖未修改时取消/关闭立即退出，已修改时继续编辑保留草稿、放弃修改退出且不保存。真实18000入口浏览器重复验证取消、右上角关闭、继续/放弃及再次打开后的取消，任务PATCH请求为0，原备注保持不变。
+
+## 任务别名与原始名称
+
+列表显示任务别名，悬停/聚焦显示只读原始名称；编辑字段改为“任务别名”，详情同时展示两者。agent在发现任务时保存original_name，名称配置仍使用既有name字段。旧host记录从保留的GPU成员命令恢复；已结束且无成员的旧记录无法可靠恢复，显示未知。完整命令仍在进程详情中保留。
+
+后端本地118项通过、2项Linux专用跳过；Ubuntu120项通过；Ruff通过。新增回归覆盖两次别名编辑、agent重启、host采样/结束保留原名、旧记录回填和无法恢复的情况，进程成员不变。36项Vitest和7条Chrome E2E通过，类型/生产构建通过；别名保存后列表hover显示原名、详情两者可见，保护和未保存取消继续通过。
+
+两个实机试用入口分别验证HTTP原名字段、列表hover、详情原名和任务别名编辑字段；未保存任何任务配置。截图为本地.runtime/preview/task-original-hover-18000.png、task-original-hover-18001.png。未测试Safari/Firefox。

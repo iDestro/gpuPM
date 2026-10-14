@@ -161,6 +161,10 @@ def group_processes(processes, previous, excluded=()):
     tasks = []
     for old in previous:
         task = dict(old)
+        task.setdefault(
+            "original_name",
+            next((p["command"][:120] for p in old["members"] if p.get("gpu_memory")), None),
+        )
         old_pids = {p["pid"] for p in old["members"]}
         task.setdefault(
             "leader_identities", [p["identity"] for p in old["members"] if p["ppid"] not in old_pids]
@@ -244,6 +248,7 @@ def group_processes(processes, previous, excluded=()):
             dict(
                 id=str(uuid4()),
                 name=process["command"][:120],
+                original_name=process["command"][:120],
                 uid=process["uid"],
                 username=process["username"],
                 started_at=min(m["create_time"] for m in members),

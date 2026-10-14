@@ -4,7 +4,7 @@ import userEvent from "@testing-library/user-event";
 import { QueryClientProvider } from "@tanstack/react-query";
 import { MemoryRouter } from "react-router-dom";
 import { queryClient } from "./api";
-import { Status } from "./components";
+import { CompactText, Status } from "./components";
 import { Accounts, Logs } from "./pages";
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); queryClient.clear(); });
 test("known status labels are Chinese while unknown codes remain intact", () => {
@@ -59,4 +59,17 @@ test("audit success filter submits the server's succeeded value", async () => {
   await userEvent.click(screen.getByRole("combobox", {name:"结果筛选"}));
   await userEvent.click(screen.getByText("成功", {exact:true}));
   expect(vi.mocked(globalThis.fetch).mock.calls.some(([url])=>String(url).includes("result=succeeded"))).toBe(true);
+});
+
+
+test("task alias keeps its label while hover and focus expose the original name", async () => {
+  render(<CompactText value="模型A训练" tooltip="原始名称：python train.py" />);
+  const alias = screen.getByText("模型A训练");
+  expect(alias).toHaveAttribute("title", "原始名称：python train.py");
+  await userEvent.hover(alias);
+  expect(await screen.findByRole("tooltip")).toHaveTextContent("原始名称：python train.py");
+  await userEvent.unhover(alias);
+  await userEvent.tab();
+  expect(alias).toHaveFocus();
+  expect(await screen.findByRole("tooltip")).toHaveTextContent("原始名称：python train.py");
 });

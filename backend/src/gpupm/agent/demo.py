@@ -53,6 +53,14 @@ class DemoAgent:
                     if account["username"] in members:
                         account["groups"] = sorted(set(account["groups"]) | {"human"})
                 db.execute("UPDATE state SET data=? WHERE id=1", (json.dumps(state),))
+            for task in state["tasks"]:
+                task.setdefault(
+                    "original_name",
+                    {"demo-task-1": "alice / training", "demo-task-2": "bob / training"}.get(
+                        task["id"], next((p["command"][:120] for p in task["members"] if p.get("gpu_memory")), None)
+                    ),
+                )
+            db.execute("UPDATE state SET data=? WHERE id=1", (json.dumps(state),))
         path.chmod(0o600)
 
     def seed(self):
@@ -105,6 +113,7 @@ class DemoAgent:
                 dict(
                     id=f"demo-task-{index + 1}",
                     name=f"{account['username']} / training",
+                    original_name=f"{account['username']} / training",
                     uid=account["uid"],
                     username=account["username"],
                     started_at=(now - timedelta(hours=index + 2)).isoformat(),

@@ -418,3 +418,24 @@ def test_web_created_account_is_automatically_managed_human(client):
     )
     assert updated.status_code == 200, updated.text
     assert updated.json()["managed"] is True
+
+
+def test_task_alias_keeps_original_name_across_edits_and_restart(client, app):
+    headers = login(client)
+    task = client.get("/api/tasks/demo-task-1").json()
+    assert task["original_name"] == "alice / training"
+    members = task["members"]
+    for name in ("模型A训练", "模型A第二阶段"):
+        response = client.patch(
+            "/api/tasks/demo-task-1", json={"revision": task["revision"], "name": name}, headers=headers
+        )
+        assert response.status_code == 200, response.text
+        task = response.json()
+        assert task["name"] == name
+        assert task["original_name"] == "alice / training"
+        assert task["members"] == members
+    with TestClient(create_app(app.state.config)) as restarted:
+        login(restarted)
+        task = restarted.get("/api/tasks/demo-task-1").json()
+        assert task["name"] == "模型A第二阶段"
+        assert task["original_name"] == "alice / training"

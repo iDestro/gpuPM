@@ -47,7 +47,7 @@ const priority: Field = {
 };
 const notes: Field = { name: "notes", label: "备注", type: "textarea" };
 const taskFields: Field[] = [
-  { name: "name", label: "任务名称", required: true },
+  { name: "name", label: "任务别名", required: true, help: "仅修改平台显示名称，不改变原始名称或进程命令" },
   priority,
   notes,
   {
@@ -342,7 +342,7 @@ export function Tasks() {
               title: "任务",
               width: 210,
               dataIndex: "name",
-              render: (v, r) => <Link to={`/tasks/${r.id}`}><CompactText value={v || r.id} /></Link>,
+              render: (v, r) => <Link to={`/tasks/${r.id}`}><CompactText value={v || r.id} tooltip={`原始名称：${r.original_name || "未知（旧记录未保留）"}`} /></Link>,
             },
             { title: "用户", dataIndex: "username", width: 120, render: (v, r) => <div className="table-identity"><CompactText value={v} />{!r.is_human ? <Tag>只读</Tag> : null}</div> },
             {
@@ -534,6 +534,8 @@ export function TaskDetail() {
           <Card>
             <RecordDetail
               row={{
+                任务别名: d.name,
+                原始名称: d.original_name || "未知（旧记录未保留）",
                 用户名: d.username,
                 分类: d.is_human ? "人员账号" : "其他账号 · 只读",
                 业务组: d.group_id,

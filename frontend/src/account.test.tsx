@@ -103,7 +103,7 @@ test.each([false,true])('readonly task disables every mutation when human=%s',as
   vi.stubGlobal('fetch',vi.fn(async(url:string)=>new Response(JSON.stringify(url.endsWith('/gpus') ? {items:[]} :
     {id:'task',name:'readonly',is_human,protected:is_human,members:[{identity:{pid:1},pid:1,ppid:0,status:'S'}],context:[]}))));
   render(<MemoryRouter initialEntries={['/tasks/task']}><QueryClientProvider client={queryClient}><Routes><Route path='/tasks/:id' element={<TaskDetail/>}/></Routes></QueryClientProvider></MemoryRouter>);
-  await screen.findByText('readonly');
+  await screen.findByRole('heading',{name:'readonly'});
   expect((screen.getByRole('button',{name:'编辑策略'}) as HTMLButtonElement).disabled).toBe(!is_human);
   for(const name of ['终止整个任务','终止进程','拆分所选进程','排除所选归属']) expect(screen.getByRole('button',{name})).toBeDisabled();
   expect(screen.getAllByRole('checkbox').every(input=>(input as HTMLInputElement).disabled)).toBe(true);

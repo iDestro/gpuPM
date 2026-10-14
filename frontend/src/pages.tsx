@@ -1616,14 +1616,22 @@ export function Settings() {
   const save = useSave();
   const [edit, setEdit] = useState(false);
   const labels: Record<string, string> = {
+    default_max_runtime_seconds: "默认最大运行时间",
+    default_task_protected: "默认任务保护",
+    default_task_priority: "默认任务优先级",
+    default_deadline_action: "默认到期动作",
+    default_cleanup_orphans: "默认残留 worker 清理",
     scan_interval_seconds: "GPU 扫描周期",
     term_grace_seconds: "终止等待时间",
-    default_max_runtime_seconds: "默认最大运行时间",
     storage_scan_interval_seconds: "存储扫描周期",
     warning_percent: "容量提醒阈值",
     critical_percent: "容量严重阈值",
-    default_deadline_action: "默认到期动作",
   };
+  const groups = [
+    { title: "新任务默认策略", names: ["default_max_runtime_seconds", "default_task_protected", "default_task_priority", "default_deadline_action", "default_cleanup_orphans"] },
+    { title: "扫描与运行策略", names: ["scan_interval_seconds", "term_grace_seconds", "storage_scan_interval_seconds"] },
+    { title: "存储告警阈值", names: ["warning_percent", "critical_percent"] },
+  ];
   const roots = [
     { name: "home_base", label: "主目录根路径", description: "新账号的主目录根路径，由宿主机初始化配置。" },
     { name: "data_base", label: "数据目录根路径", description: "个人数据目录根路径，由宿主机初始化配置。" },
@@ -1633,11 +1641,11 @@ export function Settings() {
   const fields: Field[] = Object.entries(labels).map(([name, label]) => ({
     name,
     label,
-    type: name === "default_deadline_action" ? "select" : name === "default_max_runtime_seconds" ? "duration" : "number",
-    required: name !== "default_max_runtime_seconds",
-    min: name === "storage_scan_interval_seconds" ? 60 : name === "critical_percent" ? 2 : 1,
-    max: ({ scan_interval_seconds: 300, term_grace_seconds: 120, storage_scan_interval_seconds: 86400 } as Record<string, number>)[name] ?? (name === "warning_percent" ? 99 : name === "critical_percent" ? 100 : undefined),
-    help: ["scan_interval_seconds", "term_grace_seconds", "storage_scan_interval_seconds"].includes(name) ? "单位：秒" : name.endsWith("percent") ? "单位：百分比" : undefined,
+    type: ["default_task_protected", "default_cleanup_orphans"].includes(name) ? "switch" : name === "default_deadline_action" ? "select" : name === "default_max_runtime_seconds" ? "duration" : "number",
+    required: !["default_max_runtime_seconds", "default_task_protected", "default_cleanup_orphans"].includes(name),
+    min: name === "default_task_priority" ? 0 : name === "storage_scan_interval_seconds" ? 60 : name === "critical_percent" ? 2 : 1,
+    max: ({ default_task_priority: 100, scan_interval_seconds: 300, term_grace_seconds: 120, storage_scan_interval_seconds: 86400 } as Record<string, number>)[name] ?? (name === "warning_percent" ? 99 : name === "critical_percent" ? 100 : undefined),
+    help: name === "default_max_runtime_seconds" ? "从任务启动时刻计算；留空或点击“不限时”可取消时限" : name === "default_task_protected" ? "保护任务超时只提醒，不自动终止；系统与维护任务的保护仍生效。" : name === "default_cleanup_orphans" ? "归属不明的进程不会自动清理" : ["scan_interval_seconds", "term_grace_seconds", "storage_scan_interval_seconds"].includes(name) ? "单位：秒" : name.endsWith("percent") ? "单位：百分比" : undefined,
     options: name === "default_deadline_action" ? [
       { label: translate("仅提醒"), value: "notify" },
       { label: translate("自动终止"), value: "terminate" },
@@ -1661,24 +1669,33 @@ export function Settings() {
       <ErrorAlert error={q.error || save.error} />
       <Card loading={q.isPending}>
         {q.data ? (
-          <Descriptions className="record-detail" layout="vertical" column={{ xs: 1, sm: 2, lg: 3 }} size="small">
-            {Object.entries(labels).map(([name, label]) => (
-              <Descriptions.Item key={name} label={<TermLabel label={label} />}>
-                {name === "default_deadline_action" ? statusLabel(q.data[name])
-                  : name === "default_max_runtime_seconds" ? q.data[name] == null ? translate("不限时") : translate("{hours}时 {minutes}分 {seconds}秒", { hours: Math.floor(q.data[name] / 3600), minutes: Math.floor((q.data[name] % 3600) / 60), seconds: q.data[name] % 60 })
-                  : name.endsWith("seconds") ? translate("{seconds} 秒", { seconds: q.data[name] ?? "—" })
-                  : `${q.data[name] ?? "—"}%`}
-              </Descriptions.Item>
+          <Space direction="vertical" size="large" style={{ width: "100%" }}>
+            <Typography.Text type="secondary">{translate("默认策略仅用于新发现的任务，时限从进程启动时刻计算。修改不覆盖现有任务策略；系统与维护任务的保护仍生效。")}</Typography.Text>
+            {groups.map(({ title, names }) => (
+              <Descriptions key={title} title={translate(title)} className="record-detail" layout="vertical" column={{ xs: 1, sm: 2, lg: 3 }} size="small">
+                {names.map((name) => (
+                  <Descriptions.Item key={name} label={<TermLabel label={labels[name]} />}>
+                    {name === "default_task_protected" ? translate(q.data[name] ? "已保护" : "未保护")
+                      : name === "default_cleanup_orphans" ? translate(q.data[name] ? "已启用" : "已关闭")
+                      : name === "default_deadline_action" ? statusLabel(q.data[name])
+                      : name === "default_max_runtime_seconds" ? q.data[name] == null ? translate("不限时") : translate("{hours}时 {minutes}分 {seconds}秒", { hours: Math.floor(q.data[name] / 3600), minutes: Math.floor((q.data[name] % 3600) / 60), seconds: q.data[name] % 60 })
+                      : name.endsWith("seconds") ? translate("{seconds} 秒", { seconds: q.data[name] ?? "—" })
+                      : name.endsWith("percent") ? `${q.data[name] ?? "—"}%` : q.data[name] ?? "—"}
+                  </Descriptions.Item>
+                ))}
+              </Descriptions>
             ))}
-            {roots.map(({ name, label, description }) => (
-              <Descriptions.Item key={name} label={<TermLabel label={label} />}>
-                <Space direction="vertical" size={4} style={{ width: "100%" }}>
-                  {name === "mode" ? statusLabel(q.data[name]) : <CompactText value={q.data[name]} />}
-                  <Typography.Text type="secondary">{translate(description)} · {translate("只读")}</Typography.Text>
-                </Space>
-              </Descriptions.Item>
-            ))}
-          </Descriptions>
+            <Descriptions title={translate("初始化配置（只读）")} className="record-detail" layout="vertical" column={{ xs: 1, sm: 2, lg: 3 }} size="small">
+              {roots.map(({ name, label, description }) => (
+                <Descriptions.Item key={name} label={<TermLabel label={label} />}>
+                  <Space direction="vertical" size={4} style={{ width: "100%" }}>
+                    {name === "mode" ? statusLabel(q.data[name]) : <CompactText value={q.data[name]} />}
+                    <Typography.Text type="secondary">{translate(description)} · {translate("只读")}</Typography.Text>
+                  </Space>
+                </Descriptions.Item>
+              ))}
+            </Descriptions>
+          </Space>
         ) : null}
       </Card>
       <Alert

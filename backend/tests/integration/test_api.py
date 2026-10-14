@@ -439,3 +439,73 @@ def test_task_alias_keeps_original_name_across_edits_and_restart(client, app):
         task = restarted.get("/api/tasks/demo-task-1").json()
         assert task["name"] == "模型A第二阶段"
         assert task["original_name"] == "alice / training"
+
+
+def test_task_template_settings_read_patch_and_preserve_existing_tasks(client):
+    headers = login(client)
+    initial = client.get("/api/settings").json()
+    template = {
+        "default_max_runtime_seconds": 1800,
+        "default_task_protected": False,
+        "default_task_priority": 50,
+        "default_deadline_action": "notify",
+        "default_cleanup_orphans": False,
+    }
+    assert template.items() <= initial.items()
+    before = client.get("/api/tasks").json()["items"]
+    changed = dict(
+        template,
+        default_max_runtime_seconds=None,
+        default_task_protected=True,
+        default_task_priority=100,
+        default_deadline_action="terminate",
+        default_cleanup_orphans=True,
+    )
+    response = client.patch("/api/settings", json=changed, headers=headers)
+    assert response.status_code == 200, response.text
+    assert changed.items() <= response.json().items()
+    assert changed.items() <= client.get("/api/settings").json().items()
+    after = client.get("/api/tasks").json()["items"]
+    fields = (
+        "id",
+        "name",
+        "original_name",
+        "protected",
+        "priority",
+        "max_runtime_seconds",
+        "deadline_action",
+        "cleanup_orphans",
+        "revision",
+    )
+    assert [{key: task[key] for key in fields} for task in before] == [
+        {key: task[key] for key in fields} for task in after
+    ]
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("default_task_protected", "false"),
+        ("default_task_protected", 0),
+        ("default_task_protected", None),
+        ("default_cleanup_orphans", "true"),
+        ("default_cleanup_orphans", 1),
+        ("default_cleanup_orphans", None),
+        ("default_task_priority", -1),
+        ("default_task_priority", 101),
+        ("default_task_priority", True),
+        ("default_task_priority", "50"),
+        ("default_task_priority", None),
+        ("default_max_runtime_seconds", True),
+        ("default_max_runtime_seconds", "1800"),
+        ("default_max_runtime_seconds", 315360001),
+        ("default_deadline_action", "kill"),
+        ("default_deadline_action", None),
+    ],
+)
+def test_task_template_api_rejects_invalid_parameters(client, field, value):
+    headers = login(client)
+    before = client.get("/api/settings").json()
+    response = client.patch("/api/settings", json={field: value}, headers=headers)
+    assert response.status_code == 422, response.text
+    assert client.get("/api/settings").json() == before

@@ -12,7 +12,7 @@ PATCH `/tasks/{id}` accepts `revision` plus name/notes/priority/protected/expire
 
 GET/POST `/groups`, PATCH/DELETE `/groups/{id}` use `{id,name,priority,notes,is_default}`; delete requires `move_to`. GET `/users`, PATCH `/users/{uid}` use `{uid,username,group_id,priority,notes}`. These are business groups, not Linux groups.
 
-GET/PATCH `/settings`: `scan_interval_seconds,term_grace_seconds,default_max_runtime_seconds,default_deadline_action,storage_scan_interval_seconds,warning_percent,critical_percent,home_base,data_base,share_base,mode` (root paths/mode readonly).
+GET/PATCH `/settings`: `scan_interval_seconds,term_grace_seconds,default_max_runtime_seconds,default_task_protected,default_task_priority,default_deadline_action,default_cleanup_orphans,storage_scan_interval_seconds,warning_percent,critical_percent,home_base,data_base,share_base,mode` (root paths/mode readonly).
 
 GET `/system-users?state=all|active|disabled|expired|deleted`: account array with `id,lifecycle_id,identity_conflict,username,uid,gid,primary_group,group_id,priority,groups,shell,home,data_dir,status,managed,protected,disabled,deleted_at,expires_on,expires_effective_at,require_password_change,notes,revision,public_keys,login_policy_status,last_success_login,login_coverage`. POST accepts `username,password?,public_keys,notes,groups,group_id,priority,require_password_change,expires_on`; at least one credential is required. PATCH `/{id}` accepts revision, token, reason, primary_group and editable fields. POST `/{id}/change-preview` accepts `{action,revision,changes}` (disable/enable/delete/restore/update). DELETE `/{id}` and POST `/{id}/disable|enable|restore` accept `{token,revision,reason}`. PATCH `/{id}/expiry|password-policy` requires revision/token/reason plus fields. POST `/{id}/password` requires revision/token/reason/password/require_password_change. GET `/{id}/activity` returns `{processes,sessions,scheduled,coverage}`.
 
@@ -55,3 +55,9 @@ Process context contains observed ancestors up to32 levels, never signal targets
 GET /api/tasks、/api/system-users、/api/users 支持 scope=human|other|all，默认 human；独立账号/任务详情仍可查看 other。账号、任务与业务用户响应包含 is_human。GPU/总览统计仍包括全部任务。非 human 修改返回403/non_human_readonly；human 组自身只读，普通账号编辑保留 human 附属组。成员资格由 agent 读取原生 Linux 组，操作与后台执行时重新核验，不相信客户端字段。
 
 界面任务列表默认附加 status=running，只展示运行中的人员账号任务；管理员可切换状态或清除状态筛选。API 未提供 status 时仍返回全部状态，GPU 总量与历史查询口径不变。界面分类名称为“人员账号／其他账号”，底层 human 组和 scope 参数不变。
+
+## New task defaults
+
+The five default task fields form a template copied when a task ID is first discovered. Fresh settings use max_runtime_seconds=1800, protected=false, priority=50, deadline_action=notify and cleanup_orphans=false. Runtime is measured from process startup, including time before discovery. Changing defaults does not overwrite existing task policies, including across agent restarts; individual task overrides remain available. Native system/service/maintenance protection and current human membership checks still take precedence.
+
+Existing settings JSON is filled with missing keys only; explicit null and existing values are retained. PATCH /settings accepts strict booleans for default_task_protected/default_cleanup_orphans, a strict integer 0–100 for default_task_priority, and null or a strict integer 1–315360000 seconds for default_max_runtime_seconds. Readonly initialization paths/mode cannot be changed.

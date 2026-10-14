@@ -23,6 +23,7 @@ from gpupm.agent.processes import (
     process_state,
 )
 from gpupm.domain.rules import deadline, parse_time, utcnow
+from gpupm.domain.settings import DEFAULT_SETTINGS, task_defaults
 from gpupm.errors import DomainError
 
 
@@ -196,8 +197,7 @@ class AgentService:
         state["tasks"] = group_processes(processes, state["tasks"], state["excluded"])
         for task in state["tasks"]:
             if task["id"] not in old_ids:
-                task["max_runtime_seconds"] = state["settings"].get("default_max_runtime_seconds")
-                task["deadline_action"] = state["settings"].get("default_deadline_action", "notify")
+                task.update(task_defaults(state["settings"]))
         for task in state["tasks"]:
             task["is_human"] = self.accounts.is_human(task["uid"])
             protected_uids = {0, self.config.get("api_uid")}
@@ -367,15 +367,7 @@ class AgentService:
             )
         if method == "configure":
             settings = p.get("settings", {})
-            permitted = {
-                "scan_interval_seconds",
-                "term_grace_seconds",
-                "default_max_runtime_seconds",
-                "default_deadline_action",
-                "storage_scan_interval_seconds",
-                "warning_percent",
-                "critical_percent",
-            }
+            permitted = DEFAULT_SETTINGS.keys()
             if set(settings) - permitted:
                 raise DomainError("readonly_settings", "root config paths and mode are immutable", 403)
             for field in ("scan_interval_seconds", "term_grace_seconds", "storage_scan_interval_seconds"):
@@ -388,9 +380,17 @@ class AgentService:
                 raise DomainError("invalid_settings", "default deadline action invalid", 422)
             if settings.get("default_max_runtime_seconds") is not None and (
                 type(settings["default_max_runtime_seconds"]) is not int
-                or settings["default_max_runtime_seconds"] < 1
+                or not 1 <= settings["default_max_runtime_seconds"] <= 315360000
             ):
                 raise DomainError("invalid_settings", "maximum runtime must be positive or null", 422)
+            for field in ("default_task_protected", "default_cleanup_orphans"):
+                if field in settings and type(settings[field]) is not bool:
+                    raise DomainError("invalid_settings", "task defaults require booleans", 422)
+            if "default_task_priority" in settings and (
+                type(settings["default_task_priority"]) is not int
+                or not 0 <= settings["default_task_priority"] <= 100
+            ):
+                raise DomainError("invalid_settings", "task priority must be an integer from 0 to 100", 422)
             merged = dict(state["settings"], **settings)
             warning = merged.get("warning_percent", 80)
             critical = merged.get("critical_percent", 90)

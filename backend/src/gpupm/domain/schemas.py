@@ -73,7 +73,10 @@ class Terminate(Input):
 class SettingsPatch(Input):
     scan_interval_seconds: int | None = Field(default=None, ge=1, le=300)
     term_grace_seconds: int | None = Field(default=None, ge=1, le=120)
-    default_max_runtime_seconds: int | None = Field(default=None, gt=0, le=315360000)
+    default_max_runtime_seconds: int | None = Field(default=None, strict=True, gt=0, le=315360000)
+    default_task_protected: bool | None = Field(default=None, strict=True)
+    default_task_priority: Priority | None = None
+    default_cleanup_orphans: bool | None = Field(default=None, strict=True)
     default_deadline_action: Literal["notify", "terminate"] | None = None
     storage_scan_interval_seconds: int | None = Field(default=None, ge=60, le=86400)
     warning_percent: int | None = Field(default=None, ge=1, le=99)

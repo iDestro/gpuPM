@@ -8,6 +8,7 @@ from pathlib import Path
 from uuid import uuid4
 
 from gpupm.domain.rules import account_status, parse_time, utcnow, validate_name
+from gpupm.domain.settings import DEFAULT_SETTINGS, task_defaults
 from gpupm.errors import DomainError
 
 SENSITIVE_GROUPS = {"root", "sudo", "docker", "adm", "gpupm", "shadow", "disk", "lxd", "libvirt"}
@@ -120,14 +121,10 @@ class DemoAgent:
                     members=[process(pid, 4000), process(pid + 1, pid, False)],
                     context=[],
                     notes="",
-                    priority=50,
-                    protected=False,
+                    **task_defaults(DEFAULT_SETTINGS),
                     revision=1,
                     status="running",
                     expires_at=None,
-                    max_runtime_seconds=None,
-                    deadline_action="notify",
-                    cleanup_orphans=False,
                     policy_status="applied",
                     anomalies=[],
                 )
@@ -175,7 +172,7 @@ class DemoAgent:
             idempotency={},
             events=[],
             quotas={},
-            settings={},
+            settings=DEFAULT_SETTINGS.copy(),
             login_events=[],
         )
 

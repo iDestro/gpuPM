@@ -1,11 +1,5 @@
 import { test, expect } from '@playwright/test';
-async function login(page: import('@playwright/test').Page) {
-  await page.goto('/');
-  await page.getByLabel('管理员账号').fill('admin');
-  await page.getByLabel('密码',{exact:true}).fill('Strong-admin-pass-42');
-  await page.getByRole('button',{name:/登\s*录/}).click();
-  await expect(page.getByText('服务器总览',{exact:true}).last()).toBeVisible();
-}
+import {login} from './auth';
 test('administrator can navigate every live API screen without errors',async({page})=>{
   const errors: string[]=[];
   page.on('pageerror',e=>errors.push(e.message));

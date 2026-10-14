@@ -106,11 +106,11 @@ test("rename edit submits new username through revision-bound preview before PAT
 test("login filters never leak into audit filters when navigating the actual app", async () => {
   const fetch = mockServer();
   renderPage(<App />, "/login-events");
-  await screen.findByLabelText("username");
-  await userEvent.type(screen.getByLabelText("username"), "alice");
-  await userEvent.type(screen.getByLabelText("ip"), "192.0.2.1");
+  await screen.findByLabelText("用户名");
+  await userEvent.type(screen.getByLabelText("用户名"), "alice");
+  await userEvent.type(screen.getByLabelText("来源 IP"), "192.0.2.1");
   await userEvent.click(screen.getByText("操作审计"));
-  await screen.findByLabelText("actor");
+  await screen.findByLabelText("操作人");
   await waitFor(() =>
     expect(
       fetch.mock.calls.some(([url]) => url.startsWith("/api/audit-logs")),
@@ -124,9 +124,9 @@ test("login filters never leak into audit filters when navigating the actual app
     expect(url).not.toContain("ip=");
   }
   await userEvent.click(screen.getByText("SSH 登录记录"));
-  await screen.findByLabelText("username");
-  expect(screen.getByLabelText("username")).toHaveValue("");
-  expect(screen.getByLabelText("ip")).toHaveValue("");
+  await screen.findByLabelText("用户名");
+  expect(screen.getByLabelText("用户名")).toHaveValue("");
+  expect(screen.getByLabelText("来源 IP")).toHaveValue("");
 });
 test("storage displays server ACL diagnosis without claiming tool presence means working ACL", async () => {
   vi.stubGlobal(
@@ -150,7 +150,7 @@ test("storage displays server ACL diagnosis without claiming tool presence means
     ),
   );
   renderPage(<Storage />);
-  await screen.findByText("ACL 能力：unavailable");
+  await screen.findByText("ACL 能力：不可用");
   expect(
     screen.getByText("目标数据卷未验证 ACL，需宿主机检查挂载与实际访问"),
   ).toBeInTheDocument();

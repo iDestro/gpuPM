@@ -17,7 +17,9 @@ import {
   Tooltip,
 } from "antd";
 import { useMutation, useQuery } from "@tanstack/react-query";
-import { api, date, queryClient } from "./api";
+import { api, ApiError, date, queryClient } from "./api";
+import { translate, useI18n } from "./i18n";
+import { termFor } from "./glossary";
 export type Row = Record<string, any>;
 export type Field = {
   name: string;
@@ -39,15 +41,22 @@ export type Field = {
   help?: string;
   disabled?: boolean;
 };
+export function TermLabel({ label }: { label: string }) {
+  const { locale, t } = useI18n();
+  const term = locale === "zh-CN" ? termFor(label) : undefined;
+  return term ? <Tooltip title={term} trigger={["hover", "focus"]}><span className="term-label" title={term} tabIndex={0} onClick={(event) => event.currentTarget.focus()}>{t(label)}</span></Tooltip> : <>{t(label)}</>;
+}
 export function ErrorAlert({ error }: { error: unknown }) {
-  return error ? (
-    <Alert
-      showIcon
-      type="error"
-      message={error instanceof Error ? error.message : String(error)}
-      style={{ marginBottom: 16 }}
-    />
-  ) : null;
+  const { locale, t } = useI18n();
+  if (!error) return null;
+  const diagnostic = error instanceof Error ? error.message : String(error);
+  const translated = error instanceof ApiError && error.code === "http_error" && diagnostic === `请求失败 (${error.status})`
+    ? t("请求失败 ({status})", {status:error.status}) : t(diagnostic);
+  const unknown = locale === "en-US" && translated === diagnostic && /\p{Script=Han}/u.test(diagnostic);
+  return <Alert showIcon type="error"
+    message={unknown ? t("请求失败 ({code})", { code: error instanceof ApiError ? error.code : "unknown_error" }) : translated}
+    description={unknown ? <details><summary>{t("服务器诊断")}</summary><pre className="json-view">{diagnostic}</pre></details> : undefined}
+    style={{ marginBottom: 16 }} />;
 }
 export function JsonView({ value }: { value: unknown }) {
   return <pre className="json-view">{JSON.stringify(value, null, 2)}</pre>;
@@ -56,7 +65,7 @@ export function CompactText({ value, tooltip }: { value: unknown; tooltip?: stri
   const text = value == null || value === "" ? "—" : typeof value === "object" ? JSON.stringify(value) : String(value);
   return <Tooltip title={tooltip ?? text} trigger={["hover", "focus"]}><span className="compact-text" title={tooltip ?? text} tabIndex={0}>{text}</span></Tooltip>;
 }
-export const statusLabel = (value: any) => ({
+const statusLabels: Record<string, string> = {
   running: "运行中", finished: "已结束", overdue: "已超时", anomaly: "有异常", active: "正常", succeeded: "成功", completed: "已完成",
   success: "成功", pending: "等待中", disabled: "已停用", expired: "已到期",
   failed: "失败", failure: "失败", deleted: "已软删除", error: "错误",
@@ -64,8 +73,12 @@ export const statusLabel = (value: any) => ({
   queued: "排队中", catching_up: "补扫中", demo: "演示模式", unmanaged: "未启用管理",
   applied: "已生效", unconfirmed: "未确认", confirmed: "已确认", identity_conflict: "身份冲突",
   R: "运行中", S: "休眠", D: "等待 I/O", T: "已暂停", Z: "僵尸进程",
-} as Record<string, string>)[value] ?? value ?? "未知";
+  notify: "仅提醒", terminate: "自动终止", host: "宿主机模式",
+};
+export const statusLabel = (value: any) => Object.prototype.hasOwnProperty.call(statusLabels, value)
+  ? translate(statusLabels[value]) : value ?? translate("未知");
 export function Status({ value }: { value: any }) {
+  useI18n();
   const colors: Record<string, string> = {
     running: "green",
     active: "green",
@@ -83,18 +96,19 @@ export function Status({ value }: { value: any }) {
   return <Tag className="status-tag" color={colors[value]} title={value == null ? undefined : String(value)}>{statusLabel(value)}</Tag>;
 }
 export function Source({ data }: { data: any }) {
+  const { t } = useI18n();
   return (
     <Space wrap>
       <Tag color={data?.source === "demo" ? "orange" : "blue"}>
         {data?.source === "demo"
-          ? "演示数据 · 不修改宿主机"
+          ? t("演示数据 · 不修改宿主机")
           : data?.source === "host"
-            ? "宿主机数据"
-            : "来源待确认"}
+            ? t("宿主机数据")
+            : t("来源待确认")}
       </Tag>
-      {data?.stale ? <Tag color="red">数据已过期</Tag> : null}
+      {data?.stale ? <Tag color="red">{t("数据已过期")}</Tag> : null}
       <Typography.Text type="secondary">
-        采样：{date(data?.collected_at)} · Asia/Shanghai
+        {t("采样：")}{date(data?.collected_at)} · Asia/Shanghai
       </Typography.Text>
     </Space>
   );
@@ -131,14 +145,15 @@ function runtimeSeconds(value: RuntimeValue = {}) {
 function RuntimeInput({ value = {}, onChange, id, disabled }: {
   value?: RuntimeValue; onChange?: (value: RuntimeValue) => void; id?: string; disabled?: boolean;
 }) {
+  const { t } = useI18n();
   const current = runtimeSeconds(value);
   return <Space direction="vertical" style={{ width: "100%" }}>
     <Space wrap>
       {(["hours", "minutes", "seconds"] as const).map((unit, index) => <InputNumber
         key={unit}
         id={index === 0 ? id : `${id}-${unit}`}
-        aria-label={["小时", "分钟", "秒"][index]}
-        addonAfter={["时", "分", "秒"][index]}
+        aria-label={t(["小时", "分钟", "秒"][index])}
+        addonAfter={t(["时", "分", "秒"][index])}
         min={0}
         max={index === 0 ? 87600 : 59}
         precision={0}
@@ -155,7 +170,7 @@ function RuntimeInput({ value = {}, onChange, id, disabled }: {
         type={current === seconds ? "primary" : "default"}
         disabled={disabled}
         onClick={() => onChange?.(seconds == null ? {} : { hours: Math.floor(seconds / 3600), minutes: Math.floor(seconds % 3600 / 60), seconds: seconds % 60 })}
-      >{label}</Button>)}
+      >{t(label)}</Button>)}
     </Space>
   </Space>;
 }
@@ -172,6 +187,7 @@ export function EditDialog({
   onSave: (values: Row) => Promise<unknown>;
   onClose: () => void;
 }) {
+  const { t } = useI18n();
   const [snapshot] = useState(() => ({ ...initial }));
   const [form] = Form.useForm();
   const [modal, contextHolder] = Modal.useModal();
@@ -191,9 +207,9 @@ export function EditDialog({
   const close = () => {
     if (dirty)
       modal.confirm({
-        title: "放弃尚未保存的修改？",
-        okText: "放弃修改",
-        cancelText: "继续编辑",
+        title: t("放弃尚未保存的修改？"),
+        okText: t("放弃修改"),
+        cancelText: t("继续编辑"),
         onOk: onClose,
       });
     else onClose();
@@ -239,7 +255,7 @@ export function EditDialog({
   return (
     <Modal
       open
-      title={title}
+      title={t(title)}
       onCancel={close}
       footer={null}
       maskClosable={!dirty}
@@ -261,17 +277,17 @@ export function EditDialog({
           <Form.Item
             key={f.name}
             name={f.name}
-            label={f.label}
-            extra={f.help}
+            label={<TermLabel label={f.label} />}
+            extra={f.help ? t(f.help) : undefined}
             valuePropName={f.type === "switch" ? "checked" : "value"}
             rules={[
-              ...(f.required ? [{ required: true, message: `请填写${f.label}` }] : []),
+              ...(f.required ? [{ required: true, message: t("请填写{label}", { label: t(f.label) }) }] : []),
               ...(f.type === "duration" ? [{ validator: async (_: unknown, value: RuntimeValue = {}) => {
                 const seconds = runtimeSeconds(value);
                 if (Object.values(value).some((part) => part != null && (!Number.isInteger(part) || part < 0)) ||
                     (value.minutes ?? 0) > 59 || (value.seconds ?? 0) > 59 ||
                     (seconds != null && (seconds < 1 || seconds > 315360000))) {
-                  throw new Error("运行时间需为1秒至87600小时；不限时请清空");
+                  throw new Error(t("运行时间需为1秒至87600小时；不限时请清空"));
                 }
               } }] : []),
             ]}
@@ -314,9 +330,9 @@ export function EditDialog({
         ))}
         <Space>
           <Button type="primary" htmlType="submit" loading={saving}>
-            保存
+            {t("保存")}
           </Button>
-          <Button onClick={close}>取消</Button>
+          <Button onClick={close}>{t("取消")}</Button>
         </Space>
       </Form>
     </Modal>
@@ -343,6 +359,7 @@ export function PreviewDialog({
   onDone?: (result: Row) => void;
   warning?: string;
 }) {
+  const { t } = useI18n();
   const [nonce] = useState(() => crypto.randomUUID());
   const [reason, setReason] = useState("");
   const [result, setResult] = useState<Row | null>(null);
@@ -389,15 +406,15 @@ export function PreviewDialog({
   return (
     <Modal
       open
-      title={title}
+      title={t(title)}
       width={760}
       onCancel={onClose}
       footer={
         result ? (
-          <Button onClick={onClose}>关闭</Button>
+          <Button onClick={onClose}>{t("关闭")}</Button>
         ) : (
           <Space>
-            <Button onClick={onClose}>取消</Button>
+            <Button onClick={onClose}>{t("取消")}</Button>
             <Button
               danger
               type="primary"
@@ -405,7 +422,7 @@ export function PreviewDialog({
               loading={mutation.isPending}
               onClick={execute}
             >
-              {title === "终止范围预览" ? "确认终止" : "确认执行"}
+              {t(previewPath.endsWith("/termination-preview") ? "确认终止" : "确认执行")}
             </Button>
           </Space>
         )
@@ -416,18 +433,18 @@ export function PreviewDialog({
         <Alert
           type="warning"
           showIcon
-          message={warning}
+          message={t(warning)}
           style={{ marginBottom: 16 }}
         />
       ) : null}
       {preview.isPending ? <Spin /> : null}
       {expired ? (
-        <Alert type="error" message="预览已过期，请关闭后重新预览" />
+        <Alert type="error" message={t("预览已过期，请关闭后重新预览")} />
       ) : null}
       {preview.data ? (
         <>
           <Typography.Paragraph type="secondary">
-            范围由服务器核验。预览有效期：{date(preview.data.expires_at)}
+            {t("范围由服务器核验。预览有效期：")}{date(preview.data.expires_at)}
           </Typography.Paragraph>
           {preview.data.targets ? (
             <Table<Row>
@@ -438,10 +455,10 @@ export function PreviewDialog({
               }
               dataSource={preview.data.targets}
               columns={[
-                { title: "PID", dataIndex: "pid" },
-                { title: "命令", dataIndex: "command" },
+                { title: <TermLabel label="PID" />, dataIndex: "pid" },
+                { title: <TermLabel label="命令" />, dataIndex: "command" },
                 {
-                  title: "身份",
+                  title: <TermLabel label="身份" />,
                   dataIndex: "identity",
                   render: (v) => JSON.stringify(v),
                 },
@@ -452,7 +469,7 @@ export function PreviewDialog({
           )}{" "}
           {preview.data.excluded?.length ? (
             <>
-              <Typography.Title level={5}>排除的进程</Typography.Title>
+              <Typography.Title level={5}>{t("排除的进程")}</Typography.Title>
               <JsonView value={preview.data.excluded} />
             </>
           ) : null}
@@ -463,7 +480,7 @@ export function PreviewDialog({
           <Alert
             showIcon
             type="info"
-            message="请求已提交，以下为服务器返回结果"
+            message={t("请求已提交，以下为服务器返回结果")}
           />
           <JsonView value={result} />
           {result.id && previewPath.startsWith("/tasks/") ? (
@@ -472,9 +489,9 @@ export function PreviewDialog({
         </>
       ) : (
         <Form layout="vertical">
-          <Form.Item label="操作原因" required>
+          <Form.Item label={<TermLabel label="操作原因" />} required>
             <Input.TextArea
-              aria-label={title === "终止范围预览" ? "终止原因" : "操作原因"}
+              aria-label={t(previewPath.endsWith("/termination-preview") ? "终止原因" : "操作原因")}
               value={reason}
               onChange={(e) => setReason(e.target.value)}
               rows={2}
@@ -508,6 +525,7 @@ export function TerminationDialog({
   );
 }
 export function Operation({ id }: { id: string }) {
+  const { t } = useI18n();
   const q = useQuery({
     queryKey: ["operation", id],
     queryFn: () => api(`/operations/${encodeURIComponent(id)}`),
@@ -520,12 +538,12 @@ export function Operation({ id }: { id: string }) {
     <>
       <ErrorAlert error={q.error} />
       {q.data ? (
-        <Descriptions title="操作进度" column={1}>
-          <Descriptions.Item label="状态">
+        <Descriptions title={t("操作进度")} column={1}>
+          <Descriptions.Item label={t("状态")}>
             <Status value={q.data.status} />
           </Descriptions.Item>
-          <Descriptions.Item label="来源">{q.data.source}</Descriptions.Item>
-          <Descriptions.Item label="逐项结果">
+          <Descriptions.Item label={t("来源")}>{q.data.source}</Descriptions.Item>
+          <Descriptions.Item label={t("逐项结果")}>
             <JsonView value={q.data.results} />
           </Descriptions.Item>
         </Descriptions>

@@ -2,15 +2,18 @@ import React from "react";
 import ReactDOM from "react-dom/client";
 import { ConfigProvider, App as AntApp } from "antd";
 import zhCN from "antd/locale/zh_CN";
+import enUS from "antd/locale/en_US";
+import { useI18n } from "./i18n";
 import { QueryClientProvider } from "@tanstack/react-query";
 import { BrowserRouter } from "react-router-dom";
 import { queryClient } from "./api";
 import App from "./App";
 import "./style.css";
-ReactDOM.createRoot(document.getElementById("root")!).render(
-  <React.StrictMode>
+function LocalizedApp() {
+  const { locale } = useI18n();
+  return (
     <ConfigProvider
-      locale={zhCN}
+      locale={locale === "en-US" ? enUS : zhCN}
       theme={{
         token: {
           colorPrimary: "#0969da",
@@ -38,5 +41,8 @@ ReactDOM.createRoot(document.getElementById("root")!).render(
         </QueryClientProvider>
       </AntApp>
     </ConfigProvider>
-  </React.StrictMode>,
+  );
+}
+ReactDOM.createRoot(document.getElementById("root")!).render(
+  <React.StrictMode><LocalizedApp /></React.StrictMode>,
 );

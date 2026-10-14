@@ -1,6 +1,5 @@
 import { useEffect, useRef, useState } from "react";
 import {
-  Alert,
   Button,
   Card,
   Drawer,
@@ -9,6 +8,7 @@ import {
   Layout,
   Menu,
   Space,
+  Select,
   Spin,
   Tag,
   Typography,
@@ -34,6 +34,7 @@ import {
   useNavigate,
 } from "react-router-dom";
 import { api, queryClient, Session, setSession } from "./api";
+import { useI18n } from "./i18n";
 import { ErrorAlert } from "./components";
 import {
   Accounts,
@@ -62,6 +63,8 @@ const menu = [
   { key: "/audit", label: "操作审计", icon: <AuditOutlined /> },
 ];
 export default function App() {
+  const { locale, t, setLocale } = useI18n();
+  const languageSelect = <Select className="language-select" size="small" aria-label="语言 / Language" value={locale} onChange={setLocale} options={[{ value: "zh-CN", label: "中文" }, { value: "en-US", label: "English" }]} style={{ width: 88 }} />;
   const [user, setUser] = useState<Session | null>(null);
   const [mode, setMode] = useState<string>();
   const [loading, setLoading] = useState(true);
@@ -133,7 +136,7 @@ export default function App() {
   if (loading && !user)
     return (
       <div className="screen-loading">
-        <Spin size="large" tip="连接管理服务…" />
+        <Spin size="large" tip={t("连接管理服务…")} />
       </div>
     );
   if (!user)
@@ -143,35 +146,36 @@ export default function App() {
           <span className="brand-mark">G</span>
           <Typography.Title>gpuPM</Typography.Title>
           <Typography.Title level={2}>
-            训练照常运行，
+            {t("训练照常运行，")}
             <br />
-            管理清晰有序。
+            {t("管理清晰有序。")}
           </Typography.Title>
-          <p>GPU 任务、业务优先级、账号与存储，在同一个管理入口。</p>
+          <p>{t("GPU 任务、业务优先级、账号与存储，在同一个管理入口。")}</p>
           <Space wrap>
-            <Tag>进程身份核验</Tag>
-            <Tag>操作范围预览</Tag>
-            <Tag>审计留痕</Tag>
+            <Tag>{t("进程身份核验")}</Tag>
+            <Tag>{t("操作范围预览")}</Tag>
+            <Tag>{t("审计留痕")}</Tag>
           </Space>
         </div>
         <Card className="login-card">
-          <Typography.Title level={3}>管理员登录</Typography.Title>
+          <div className="login-language">{languageSelect}</div>
+          <Typography.Title level={3}>{t("管理员登录")}</Typography.Title>
           <Typography.Paragraph type="secondary">
-            使用平台管理员凭据登录。Linux 账号密码与此独立。
+            {t("使用平台管理员凭据登录。Linux 账号密码与此独立。")}
           </Typography.Paragraph>
           <ErrorAlert error={error} />
           <Form layout="vertical" onFinish={login}>
             <Form.Item
-              label="管理员账号"
+              label={t("管理员账号")}
               name="username"
-              rules={[{ required: true, message: "请输入管理员账号" }]}
+              rules={[{ required: true, message: t("请输入管理员账号") }]}
             >
               <Input autoComplete="username" size="large" />
             </Form.Item>
             <Form.Item
-              label="密码"
+              label={t("密码")}
               name="password"
-              rules={[{ required: true, message: "请输入密码" }]}
+              rules={[{ required: true, message: t("请输入密码") }]}
             >
               <Input.Password autoComplete="current-password" size="large" />
             </Form.Item>
@@ -182,52 +186,54 @@ export default function App() {
               size="large"
               loading={loading}
             >
-              登录管理平台
+              {t("登录管理平台")}
             </Button>
           </Form>
-          <p className="login-foot">安全会话 · 服务端 CSRF 校验</p>
+          <p className="login-foot">{t("安全会话 · 服务端 CSRF 校验")}</p>
         </Card>
       </div>
     );
   const selected = location.pathname.startsWith("/tasks/")
     ? "/tasks"
     : location.pathname;
+  const localizedMenu = menu.map(item => ({ ...item, label: t(item.label) }));
   const navigationItems = [
-    { type: "group" as const, label: "资源监控", children: menu.slice(0, 2) },
-    { type: "group" as const, label: "账号与权限", children: [menu[4], menu[5], menu[2], menu[3]] },
-    { type: "group" as const, label: "存储协作", children: menu.slice(6, 8) },
-    { type: "group" as const, label: "记录与设置", children: [menu[8], menu[10], menu[9]] },
+    { type: "group" as const, label: t("资源监控"), children: localizedMenu.slice(0, 2) },
+    { type: "group" as const, label: t("账号与权限"), children: [localizedMenu[4], localizedMenu[5], localizedMenu[2], localizedMenu[3]] },
+    { type: "group" as const, label: t("存储协作"), children: localizedMenu.slice(6, 8) },
+    { type: "group" as const, label: t("记录与设置"), children: [localizedMenu[8], localizedMenu[10], localizedMenu[9]] },
   ];
   const navigation = <>
     <div className="brand">
       <span className="brand-mark">G</span>
-      <div>gpuPM<small>服务器管理</small></div>
+      <div>gpuPM<small>{t("服务器管理")}</small></div>
     </div>
-    <nav className="sidebar-menu" aria-label="主导航">
+    <nav className="sidebar-menu" aria-label={t("主导航")}>
       <Menu selectedKeys={[selected]} items={navigationItems} onClick={({ key }) => {
         navigate(key);
         setNavigationOpen(false);
       }} />
     </nav>
-    <div className="sidebar-footer">单机控制台 <span>UTC+8</span></div>
+    <div className="sidebar-footer">{t("单机控制台")} <span>UTC+8</span></div>
   </>;
   return (
     <Layout className="app-layout">
-      <a href="#main-content" className="skip-link">跳转到内容</a>
+      <a href="#main-content" className="skip-link">{t("跳转到内容")}</a>
       <Layout.Sider width={224} theme="light" className="sidebar">{navigation}</Layout.Sider>
-      <Drawer title="导航" open={navigationOpen} onClose={() => setNavigationOpen(false)} placement="left" width={264} className="navigation-drawer" destroyOnHidden>
+      <Drawer title={t("导航")} open={navigationOpen} onClose={() => setNavigationOpen(false)} placement="left" width={264} className="navigation-drawer" destroyOnHidden>
         {navigation}
       </Drawer>
       <Layout className="app-main">
         <Layout.Header className="topbar">
           <div className="topbar-context">
-            <Button className="navigation-toggle" aria-label="打开导航" aria-expanded={navigationOpen} icon={<MenuOutlined />} onClick={() => setNavigationOpen(true)} />
-            <span className="header-context">{menu.find(item => item.key === selected)?.label || "管理控制台"}</span>
+            <Button className="navigation-toggle" aria-label={t("打开导航")} aria-expanded={navigationOpen} icon={<MenuOutlined />} onClick={() => setNavigationOpen(true)} />
+            <span className="header-context">{localizedMenu.find(item => item.key === selected)?.label || t("管理控制台")}</span>
           </div>
           <div className="topbar-actions">
-            <Tag color={mode === "demo" ? "orange" : "blue"}>{mode === "demo" ? "演示模式 · 不操作宿主机" : mode === "host" ? "真实服务器" : "模式待核验"}</Tag>
+            {languageSelect}
+            <Tag color={mode === "demo" ? "orange" : "blue"}>{mode === "demo" ? t("演示模式 · 不操作宿主机") : mode === "host" ? t("真实服务器") : t("模式待核验")}</Tag>
             <Typography.Text className="header-user">{user.username}</Typography.Text>
-            <Button type="text" aria-label="退出" icon={<LogoutOutlined />} loading={logoutBusy} onClick={logout}><span className="logout-label">退出</span></Button>
+            <Button type="text" aria-label={t("退出")} icon={<LogoutOutlined />} loading={logoutBusy} onClick={logout}><span className="logout-label">{t("退出")}</span></Button>
           </div>
         </Layout.Header>
         <div className="content-scroll" role="main" id="main-content" tabIndex={-1} ref={contentRef}>
@@ -249,7 +255,7 @@ export default function App() {
             <Route path="*" element={<Navigate to="/" replace />} />
           </Routes>
           </div>
-          <Layout.Footer className="footer">gpuPM · 时间显示为 Asia/Shanghai</Layout.Footer>
+          <Layout.Footer className="footer">{t("gpuPM · 时间显示为 Asia/Shanghai")}</Layout.Footer>
         </div>
       </Layout>
     </Layout>

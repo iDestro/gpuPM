@@ -1,22 +1,7 @@
 import { test, expect } from '@playwright/test';
-import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+import {login} from './auth';
 
-const sessionFile = 'test-results/layout-session.json';
 const reason = 'Restore verified QA account management records omitted during trial deployment / ' + 'very-long-diagnostic-value-'.repeat(35);
-async function login(page: any) {
-  if (existsSync(sessionFile)) {
-    await page.context().addCookies(JSON.parse(readFileSync(sessionFile, 'utf8')));
-    await page.goto('/');
-    await expect(page.getByText('服务器总览', {exact:true}).last()).toBeVisible();
-    return;
-  }
-  await page.goto('/');
-  await page.getByLabel('管理员账号').fill('admin');
-  await page.getByLabel('密码', {exact:true}).fill('Strong-admin-pass-42');
-  await page.getByRole('button', {name:/登\s*录/}).click();
-  await expect(page.getByText('服务器总览', {exact:true}).last()).toBeVisible();
-  writeFileSync(sessionFile, JSON.stringify(await page.context().cookies()), {mode:0o600});
-}
 async function longAudit(page: any) {
   await page.route('**/api/audit-logs?**', route => route.fulfill({json:{
     items:Array.from({length:40}, (_, i) => ({id:'layout-'+i,time:'2026-10-14T06:05:44Z',actor:'root-trial-reconciliation-with-long-actor-name',action:'account.management_import',target:'100'+i,result:'succeeded',reason,before:{managed:false},after:{managed:true}})), total:40,

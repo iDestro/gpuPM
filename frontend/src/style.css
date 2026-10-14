@@ -115,3 +115,11 @@ button, input, select { font: inherit; }
 .table-identity .ant-tag { margin-top: 3px; }
 
 .log-coverage summary > span + span { margin-left: 8px; }
+
+.term-label { cursor: help; text-decoration: underline dotted #8c959f; text-underline-offset: 3px; }
+.term-label:focus-visible { outline: 2px solid #0969da; outline-offset: 3px; border-radius: 2px; }
+@media (max-width: 575px) {
+  .topbar-context { flex: 1; overflow: hidden; }
+  .topbar-actions .ant-tag { max-width: 84px; overflow: hidden; text-overflow: ellipsis; }
+  .topbar-actions .language-select { width: 84px !important; }
+}

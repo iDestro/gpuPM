@@ -80,8 +80,8 @@ const taskFields: Field[] = [
     help: "归属不明的进程不会自动清理",
   },
 ];
-const scopeOptions = [{ label: "human 用户", value: "human" }, { label: "其他用户（只读）", value: "other" }, { label: "全部用户", value: "all" }];
-const classification = { title: "分类", dataIndex: "is_human", render: (v: boolean) => <Tag>{v ? "human" : "其他 · 只读"}</Tag> };
+const scopeOptions = [{ label: "人员账号", value: "human" }, { label: "其他账号（只读）", value: "other" }, { label: "全部账号", value: "all" }];
+const classification = { title: "分类", dataIndex: "is_human", render: (v: boolean) => <Tag>{v ? "人员账号" : "其他账号 · 只读"}</Tag> };
 const label = (value: any) => (value == null ? "无数据" : String(value));
 export function PageHead({
   title,
@@ -212,6 +212,7 @@ export function Tasks() {
     page_size: 20,
     sort: "priority",
     scope: "human",
+    status: "running",
   });
   const [selected, setSelected] = useState<React.Key[]>([]);
   const [merging, setMerging] = useState(false);
@@ -226,7 +227,7 @@ export function Tasks() {
     <>
       <PageHead
         title="GPU 任务"
-        description="默认展示 human 用户任务。其他任务只读，保护任务禁止终止；严格按业务组 → 用户 → 任务优先级排序，不改变 Linux 或 GPU 调度。"
+        description="默认展示运行中的人员账号任务。其他任务只读，保护任务禁止终止；严格按业务组 → 用户 → 任务优先级排序，不改变 Linux 或 GPU 调度。"
         action={
           <Button
             disabled={selected.length < 2}
@@ -271,11 +272,15 @@ export function Tasks() {
           />
           <Select
             aria-label="状态筛选"
+            value={filter.status}
             placeholder="全部状态"
             allowClear
-            options={["running", "overdue", "anomaly", "finished"].map(
-              (v) => ({ label: v, value: v }),
-            )}
+            options={[
+              { label: "运行中", value: "running" },
+              { label: "已超时", value: "overdue" },
+              { label: "有异常", value: "anomaly" },
+              { label: "已结束", value: "finished" },
+            ]}
             onChange={(v) => setFilter({ ...filter, status: v, page: 1 })}
           />
           <Select
@@ -504,7 +509,7 @@ export function TaskDetail() {
             <RecordDetail
               row={{
                 用户名: d.username,
-                分类: d.is_human ? "human" : "其他 · 只读",
+                分类: d.is_human ? "人员账号" : "其他账号 · 只读",
                 业务组: d.group_id,
                 三级优先级: d.priority_tuple,
                 保护状态: d.protected ? "已保护" : "未保护",
@@ -744,7 +749,7 @@ export function BusinessUsers() {
     <>
       <PageHead
         title="用户业务策略"
-        description="默认展示 human 用户；其他用户只读。每个用户属于一个业务组，修改后现有任务立即采用新的三级优先级。"
+        description="默认展示人员账号；其他账号只读。每个用户属于一个业务组，修改后现有任务立即采用新的三级优先级。"
       />
       <ErrorAlert error={q.error || save.error} />
       <Card>
@@ -862,7 +867,7 @@ export function Accounts() {
     <>
       <PageHead
         title="Linux 本地账号"
-        description="human 附属组成员为人员账号；其他与保护账号只读。账号软删除保留全部文件与进程，普通账号需明确纳管后方可操作。"
+        description="默认展示人员账号；其他与保护账号只读。账号软删除保留全部文件与进程，普通账号需明确纳管后方可操作。"
         action={
           <Button
             type="primary"

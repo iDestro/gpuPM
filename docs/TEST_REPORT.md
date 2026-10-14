@@ -62,3 +62,5 @@ SQLite 备份回归验证提交的 WAL 数据被包含、未提交数据不被�
 - 更新前两类应用库/agent库一致备份，三个服务重启后 HTTP 登录、默认 human 分类、其他账号查看及 root 元数据修改403通过。
 - 实机重新执行 account_policy_smoke.py 与 gpu_smoke.py：新建账号默认 human；改组/改名仍保留 human（后续变更成功即验证 native writable 的 human 校验）；QA GPU 归组、TERM/KILL、兄弟任务与 CPU supervisor 保留、自动到期通过。测试仅操作 QA 账号/进程。当前可见原 GPU PID4938身份保留；本轮 CUDA 验收开始时2374928已不在NVML列表，测试没有向它发送信号。
 - 当前实机没有非 human GPU 占用任务；该类禁止修改及撤销信号路径由自动化回归覆盖。未为此启动系统账号的GPU负载。
+
+界面默认状态增量回归：27项前端测试及4条Chrome流程通过，覆盖默认 scope=human/status=running、切换已结束后隐藏运行任务、切回运行中及人员/其他账号文案。生产构建通过，服务器两个入口的新包 index-Du-YVC4A.js 已核验。

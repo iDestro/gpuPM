@@ -64,10 +64,17 @@ test('human defaults, readonly other rows and task list termination preview',asy
   page.on('request',request=>{ if(request.url().includes('/api/tasks?')) taskRequests.push(request.url()); });
   await page.goto('/tasks');
   const humanRow=page.getByRole('row').filter({has:page.locator('a[href="/tasks/demo-task-2"]')});
+  await page.getByRole('combobox',{name:'状态筛选'}).focus();
+  await page.getByRole('combobox',{name:'状态筛选'}).press('ArrowDown');
+  await page.getByText('已结束',{exact:true}).click();
+  await expect(humanRow).toHaveCount(0);
+  await page.getByRole('combobox',{name:'状态筛选'}).focus();
+  await page.getByRole('combobox',{name:'状态筛选'}).press('ArrowDown');
+  await page.getByText('运行中',{exact:true}).click();
   await humanRow.getByRole('button',{name:'终止任务'}).click();
   await expect(page.getByText('终止范围预览',{exact:true})).toBeVisible();
   await expect(page.getByRole('button',{name:'确认终止'})).toBeDisabled();
-  expect(taskRequests.some(url=>new URL(url).searchParams.get('scope')==='human')).toBe(true);
+  expect(taskRequests.some(url=>new URL(url).searchParams.get('scope')==='human' && new URL(url).searchParams.get('status')==='running')).toBe(true);
   await page.getByRole('button',{name:/取\s*消/}).click();
   await page.route('**/api/tasks?**',async route=>{
     const response=await route.fetch();
@@ -88,6 +95,6 @@ test('human defaults, readonly other rows and task list termination preview',asy
   await expect(bob.getByRole('button',{name:/停\s*用/})).toBeDisabled();
   await page.getByRole('combobox',{name:'账号范围'}).focus();
   await page.getByRole('combobox',{name:'账号范围'}).press('ArrowDown');
-  await page.getByText('其他用户（只读）',{exact:true}).click();
+  await page.getByText('其他账号（只读）',{exact:true}).click();
   await expect(bob).toHaveCount(0);
 });

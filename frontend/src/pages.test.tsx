@@ -199,10 +199,10 @@ test("accounts default to human scope and other accounts remain readonly", async
   expect(screen.getByRole("button", {name:/停\s*用/})).toBeDisabled();
   expect(request.mock.calls[0][0]).toContain("scope=human");
   await userEvent.click(screen.getByRole("combobox", {name:"账号范围"}));
-  await userEvent.click(screen.getByText("其他用户（只读）", {exact:true}));
+  await userEvent.click(screen.getByText("其他账号（只读）", {exact:true}));
   await waitFor(()=>expect(request.mock.calls.some(([url])=>url.includes("scope=other"))).toBe(true));
   await userEvent.click(screen.getByRole("combobox", {name:"账号范围"}));
-  await userEvent.click(screen.getByText("全部用户", {exact:true}));
+  await userEvent.click(screen.getByText("全部账号", {exact:true}));
   await waitFor(()=>expect(request.mock.calls.some(([url])=>url.includes("scope=all"))).toBe(true));
 }, 10000);
 test("task list defaults to human and opens existing termination preview", async () => {
@@ -213,6 +213,8 @@ test("task list defaults to human and opens existing termination preview", async
   expect(buttons[0]).toBeEnabled();
   expect(buttons[1]).toBeDisabled();
   expect(request.mock.calls[0][0]).toContain("scope=human");
+  expect(request.mock.calls[0][0]).toContain("status=running");
+  expect(screen.getByText("运行中", {exact:true})).toBeVisible();
   expect(request.mock.calls.some(([url]) => url === "/api/users?scope=human")).toBe(true);
   await userEvent.click(buttons[0]);
   await screen.findByText("终止范围预览");

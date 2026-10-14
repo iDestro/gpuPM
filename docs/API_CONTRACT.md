@@ -53,3 +53,5 @@ Process context contains observed ancestors up to32 levels, never signal targets
 ## human 范围
 
 GET /api/tasks、/api/system-users、/api/users 支持 scope=human|other|all，默认 human；独立账号/任务详情仍可查看 other。账号、任务与业务用户响应包含 is_human。GPU/总览统计仍包括全部任务。非 human 修改返回403/non_human_readonly；human 组自身只读，普通账号编辑保留 human 附属组。成员资格由 agent 读取原生 Linux 组，操作与后台执行时重新核验，不相信客户端字段。
+
+界面任务列表默认附加 status=running，只展示运行中的人员账号任务；管理员可切换状态或清除状态筛选。API 未提供 status 时仍返回全部状态，GPU 总量与历史查询口径不变。界面分类名称为“人员账号／其他账号”，底层 human 组和 scope 参数不变。

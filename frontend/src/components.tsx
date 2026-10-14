@@ -136,6 +136,7 @@ export function EditDialog({
 }) {
   const [snapshot] = useState(() => ({ ...initial }));
   const [form] = Form.useForm();
+  const [modal, contextHolder] = Modal.useModal();
   const [dirty, setDirty] = useState(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<unknown>(null);
@@ -151,7 +152,7 @@ export function EditDialog({
   }, [dirty]);
   const close = () => {
     if (dirty)
-      Modal.confirm({
+      modal.confirm({
         title: "放弃尚未保存的修改？",
         okText: "放弃修改",
         cancelText: "继续编辑",
@@ -199,6 +200,7 @@ export function EditDialog({
       width={650}
       destroyOnHidden
     >
+      {contextHolder}
       <ErrorAlert error={error} />
       <Form
         form={form}

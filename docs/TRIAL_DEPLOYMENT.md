@@ -52,3 +52,9 @@ HTTP验收：默认人员列表仅原有3人；已软删除筛选15人全部mana
 已发布两个入口：JS index-DaLEnkAM.js，CSS index-BMV94eZ9.css。账号密码和root只读配置保持原设置。实机Chrome核对审计长列表滚动、账号页和375px手机导航；15个QA账号仍已管理/已软删除，未执行原生账号变更。
 
 当前实机截图位于本机 .runtime/preview/dashboard-audit-native.png、dashboard-audit-scrolled-native.png、dashboard-accounts-native.png 和 dashboard-tasks-mobile-native.png（本地检查产物，不入版本库）。
+
+## 编辑弹窗关闭修复
+
+两个试用入口已发布修复：当前JS为index-D5esl8As.js，CSS仍为index-BMV94eZ9.css。共享编辑弹窗的未保存确认改用Modal.useModal，取消和右上角关闭均恢复；未修改直接关闭，已修改可继续编辑或放弃草稿。
+
+35项前端测试和7条Chrome E2E通过。真实入口浏览器验证关闭流程成功，未发送任务PATCH，任务备注前后相同。仅更新静态文件，账号密码和服务配置保持原设置。

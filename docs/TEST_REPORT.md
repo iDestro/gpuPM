@@ -86,3 +86,9 @@ SQLite 备份回归验证提交的 WAL 数据被包含、未提交数据不被�
 实机真实host模式浏览器登录、审计/账号/手机视图和滚动截屏通过；静态包在18000/18001均核验。15个QA已管理/软删除状态保持，未执行原生写操作。未实测Safari/Firefox或全部手机机型。
 
 参考：[shadcn-admin](https://github.com/satnaing/shadcn-admin)、[Tabler](https://github.com/tabler/tabler)。借鉴布局和信息层级，继续使用项目原AntD组件，无框架迁移。
+
+## 编辑弹窗关闭修复
+
+复现修改任务后点击取消或右上角关闭没有确认弹窗：共享EditDialog使用的AntD静态Modal.confirm在React19下失效，改为现有Modal.useModal并渲染contextHolder，无新增依赖。兼容性说明见[AntD官方文档](https://5x-ant-design.antgroup.com/docs/react/v5-for-19)。
+
+35项Vitest、7条Chrome E2E及类型/生产构建通过。新增覆盖未修改时取消/关闭立即退出，已修改时继续编辑保留草稿、放弃修改退出且不保存。真实18000入口浏览器重复验证取消、右上角关闭、继续/放弃及再次打开后的取消，任务PATCH请求为0，原备注保持不变。

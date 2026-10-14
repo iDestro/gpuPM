@@ -167,3 +167,27 @@ test("account soft deletion submits preview token and revision without inventing
     fetch.mock.calls.some((c) => String(c[0]).startsWith("/api/operations/")),
   ).toBe(false);
 });
+
+
+test.each([/取\s*消/, "Close"])("clean edit dialog closes through %s without saving", async (name) => {
+  const onClose=vi.fn(), onSave=vi.fn();
+  render(<EditDialog title="编辑任务" fields={[{name:"notes",label:"备注"}]} initial={{notes:"saved"}} onClose={onClose} onSave={onSave}/>);
+  await userEvent.click(screen.getByRole("button",{name}));
+  expect(onClose).toHaveBeenCalledTimes(1);
+  expect(onSave).not.toHaveBeenCalled();
+});
+test("dirty edit cancellation offers continuing or discarding without an implicit save", async () => {
+  const onClose=vi.fn(), onSave=vi.fn();
+  render(<EditDialog title="编辑任务" fields={[{name:"notes",label:"备注"}]} initial={{notes:"saved"}} onClose={onClose} onSave={onSave}/>);
+  await userEvent.type(screen.getByLabelText("备注")," draft");
+  await userEvent.click(screen.getByRole("button",{name:/取\s*消/}));
+  await screen.findByRole("button",{name:"继续编辑"});
+  await userEvent.click(screen.getByRole("button",{name:"继续编辑"}));
+  expect(onClose).not.toHaveBeenCalled();
+  expect(screen.getByLabelText("备注")).toHaveValue("saved draft");
+  await userEvent.click(screen.getByRole("button",{name:"Close"}));
+  await screen.findByRole("button",{name:"继续编辑"});
+  await userEvent.click(screen.getByRole("button",{name:"放弃修改"}));
+  await waitFor(()=>expect(onClose).toHaveBeenCalledTimes(1));
+  expect(onSave).not.toHaveBeenCalled();
+});

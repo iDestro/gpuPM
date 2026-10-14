@@ -29,6 +29,18 @@ test('task policy edits persist and protected task cannot be terminated',async({
   await expect(page.getByRole('dialog')).toHaveCount(0);
   await expect(page.getByText('browser-verified-note')).toBeVisible();
   await expect(page.getByRole('button',{name:'终止整个任务'})).toBeDisabled();
+  await page.getByRole('button',{name:'编辑策略'}).click();
+  await page.getByLabel('备注').fill('unsaved-cancel-check');
+  await page.getByRole('button',{name:/取\s*消/}).click();
+  await expect(page.getByText('放弃尚未保存的修改？',{exact:true}).last()).toBeVisible();
+  await page.getByRole('button',{name:'继续编辑'}).click();
+  await expect(page.getByLabel('备注')).toHaveValue('unsaved-cancel-check');
+  await page.getByRole('dialog').getByRole('button',{name:'Close',exact:true}).click();
+  await expect(page.getByText('放弃尚未保存的修改？',{exact:true}).last()).toBeVisible();
+  await page.getByRole('button',{name:'放弃修改'}).click();
+  await expect(page.getByRole('dialog')).toHaveCount(0);
+  await expect(page.getByText('browser-verified-note')).toBeVisible();
+
 });
 test('soft deletion retains account and restoration leaves prior disable restriction',async({page})=>{
   await login(page);

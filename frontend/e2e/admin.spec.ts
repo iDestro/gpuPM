@@ -58,3 +58,36 @@ test('soft deletion retains account and restoration leaves prior disable restric
   expect(account.home).toBe('/home/alice');
   expect(account.data_dir).toBe('/data/alice');
 });
+test('human defaults, readonly other rows and task list termination preview',async({page})=>{
+  await login(page);
+  const taskRequests: string[]=[];
+  page.on('request',request=>{ if(request.url().includes('/api/tasks?')) taskRequests.push(request.url()); });
+  await page.goto('/tasks');
+  const humanRow=page.getByRole('row').filter({has:page.locator('a[href="/tasks/demo-task-2"]')});
+  await humanRow.getByRole('button',{name:'终止任务'}).click();
+  await expect(page.getByText('终止范围预览',{exact:true})).toBeVisible();
+  await expect(page.getByRole('button',{name:'确认终止'})).toBeDisabled();
+  expect(taskRequests.some(url=>new URL(url).searchParams.get('scope')==='human')).toBe(true);
+  await page.getByRole('button',{name:/取\s*消/}).click();
+  await page.route('**/api/tasks?**',async route=>{
+    const response=await route.fetch();
+    const data=await response.json();
+    await route.fulfill({response,json:{...data,items:data.items.map((row:any)=>({...row,is_human:false}))}});
+  });
+  await page.goto('/tasks');
+  await expect(humanRow.getByRole('button',{name:'终止任务'})).toBeDisabled();
+  await expect(humanRow.getByRole('checkbox')).toBeDisabled();
+  await page.route('**/api/system-users?**',async route=>{
+    const response=await route.fetch();
+    const rows=await response.json();
+    await route.fulfill({response,json:rows.map((row:any)=>({...row,is_human:false}))});
+  });
+  await page.goto('/accounts');
+  const bob=page.getByRole('row').filter({has:page.getByRole('button',{name:'bob',exact:true})});
+  await expect(bob.getByRole('button',{name:/编\s*辑/})).toBeDisabled();
+  await expect(bob.getByRole('button',{name:/停\s*用/})).toBeDisabled();
+  await page.getByRole('combobox',{name:'账号范围'}).focus();
+  await page.getByRole('combobox',{name:'账号范围'}).press('ArrowDown');
+  await page.getByText('其他用户（只读）',{exact:true}).click();
+  await expect(bob).toHaveCount(0);
+});

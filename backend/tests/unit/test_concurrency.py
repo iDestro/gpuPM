@@ -52,7 +52,9 @@ def test_heartbeat_registers_new_and_reconfirms_membership_revision(tmp_path):
         def call(self, method, params):
             if method == "snapshot":
                 return {
-                    "tasks": [{"id": "task1", "revision": self.revision, "status": "running"}],
+                    "tasks": [
+                        {"id": "task1", "revision": self.revision, "status": "running", "is_human": True}
+                    ],
                     "collected_at": __import__("datetime")
                     .datetime.now(__import__("datetime").timezone.utc)
                     .isoformat(),
@@ -143,3 +145,27 @@ def test_native_protection_is_visible_even_if_requested_policy_clears_it(tmp_pat
     with sessions.begin() as db:
         db.add(TaskConfig(task_id="task", policy={"protected": False}, revision=1, status="applied"))
     assert ctx.tasks()[0][0]["protected"] is True
+
+
+def test_heartbeat_does_not_register_other_task_policy(tmp_path):
+    from gpupm.domain.rules import utcnow
+
+    _, sessions = database(tmp_path / "app.db")
+
+    class Agent:
+        def call(self, method, params):
+            if method == "snapshot":
+                return {
+                    "tasks": [{"id": "other", "revision": 1, "status": "running", "is_human": False}],
+                    "collected_at": utcnow().isoformat(),
+                }
+            if method == "apply_task_policy":
+                raise AssertionError("other task must never receive managed policy")
+            if method == "heartbeat":
+                assert params["policy_versions"] == {}
+            if method == "audit_since":
+                return []
+
+    Context(sessions, Agent(), Config()).heartbeat()
+    with sessions() as db:
+        assert db.get(TaskConfig, "other") is None

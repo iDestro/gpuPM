@@ -1,4 +1,5 @@
 from datetime import datetime
+from typing import Literal
 
 from fastapi import APIRouter, Query, Request
 from pydantic import Field
@@ -48,7 +49,7 @@ class SharePatch(Input):
 
 
 @router.get("/system-users")
-def accounts(request: Request, state: str = "active"):
+def accounts(request: Request, state: str = "active", scope: Literal["human", "other", "all"] = "human"):
     ctx = context(request)
     profiles = {u["uid"]: u for u in ctx.users()}
     result = [
@@ -59,6 +60,7 @@ def accounts(request: Request, state: str = "active"):
         )
         for a in ctx.agent.call("list_accounts")
     ]
+    result = [a for a in result if scope == "all" or bool(a.get("is_human", False)) == (scope == "human")]
     if state == "all":
         return result
     if state == "active":
@@ -70,7 +72,7 @@ def accounts(request: Request, state: str = "active"):
 
 @router.get("/system-users/{ident}")
 def account(ident: str, request: Request):
-    for item in accounts(request, state="all"):
+    for item in accounts(request, state="all", scope="all"):
         if item["id"] == ident:
             return item
     raise DomainError("not_found", "账号不存在", 404)

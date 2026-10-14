@@ -186,6 +186,8 @@ class AgentService:
         except Exception as exc:
             state["errors"] = [dict(code="collector_failed", message=str(exc))]
             state["stale"] = True
+            for task in state["tasks"]:
+                task["is_human"] = self.accounts.is_human(task["uid"])
             return
         state["gpus"] = gpus
         state["errors"] = errors
@@ -197,6 +199,7 @@ class AgentService:
                 task["max_runtime_seconds"] = state["settings"].get("default_max_runtime_seconds")
                 task["deadline_action"] = state["settings"].get("default_deadline_action", "notify")
         for task in state["tasks"]:
+            task["is_human"] = self.accounts.is_human(task["uid"])
             protected_uids = {0, self.config.get("api_uid")}
             if (
                 task["uid"] in protected_uids
@@ -285,7 +288,12 @@ class AgentService:
             raise DomainError("scope_changed", "preview changes differ")
         return preview
 
+    def require_human_task(self, task):
+        if not self.accounts.is_human(task["uid"]):
+            raise DomainError("non_human_readonly", "only human tasks are editable", 403)
+
     def targets(self, task, identity=None):
+        self.require_human_task(task)
         if task["protected"] or task["status"] == "finished":
             raise DomainError("protected", "task protected or finished", 403)
         targets = []
@@ -418,6 +426,7 @@ class AgentService:
             return self.accounts.activity(state, p["id"])
         if method == "apply_task_policy":
             task = self.find(state, "tasks", p["task_id"])
+            self.require_human_task(task)
             self.revision(task, p)
             policy = p["policy"]
             fields = {
@@ -458,6 +467,7 @@ class AgentService:
                 if len(tasks) < 2 or len({t["uid"] for t in tasks}) != 1:
                     raise DomainError("invalid_grouping", "merge requires same UID")
                 for task in tasks:
+                    self.require_human_task(task)
                     self.revision(task, dict(revision=p["revisions"].get(task["id"])))
                 target = tasks[0]
                 target["members"] = [m for t in tasks for m in t["members"]]
@@ -471,6 +481,7 @@ class AgentService:
                 self.event(state, p, "task.merge", target["id"], None, target)
                 return target
             task = self.find(state, "tasks", p["task_id"])
+            self.require_human_task(task)
             self.revision(task, p)
             selected = p.get("identities", p.get("excluded_identities", []))
             keys = {identity_key(i) for i in selected}
@@ -663,7 +674,7 @@ class AgentService:
             raise DomainError("invalid_fields", "only group name and members editable", 422)
         if action == "create":
             name = validate_name(changes["name"])
-            if name in SENSITIVE_GROUPS:
+            if name in SENSITIVE_GROUPS or name == "human":
                 raise DomainError("protected_group", "sensitive group forbidden", 403)
             try:
                 grp.getgrnam(name)
@@ -678,17 +689,20 @@ class AgentService:
                 raise DomainError("not_found", "system group not found", 404)
             if group["protected"] or not group["managed"]:
                 raise DomainError("protected_group", "only managed ordinary groups editable", 403)
+            self.accounts.assert_human_group(group["name"])
             self.revision(group, p)
         if "members" in changes:
             if not isinstance(changes["members"], list):
                 raise DomainError("invalid_members", "members must be a list", 422)
             for name in changes["members"]:
                 entry = self.accounts.find(state, str(__import__("pwd").getpwnam(name).pw_uid))
+                if not self.accounts.is_human(entry["uid"]):
+                    raise DomainError("non_human_readonly", "group members must be human", 403)
                 if entry["protected"] or not entry["managed"]:
                     raise DomainError("protected_account", "grant only to managed ordinary accounts", 403)
         if "name" in changes:
             name = validate_name(changes["name"])
-            if name in SENSITIVE_GROUPS:
+            if name in SENSITIVE_GROUPS or name == "human":
                 raise DomainError("protected_group", "sensitive group forbidden", 403)
         if method == "preview_group_change":
             return self.preview(state, "group", group, action, changes)
@@ -744,8 +758,11 @@ class AgentService:
                     state = self.load(db)
                     job = state["jobs"][ident]
                     task = self.find(state, "tasks", job["task_id"])
+                    if not self.accounts.is_human(task["uid"]) or not self.accounts.is_human(member["uid"]):
+                        job["human_scope_revoked"] = True
                     if (
                         task["protected"]
+                        or job.get("human_scope_revoked")
                         or task["revision"] != job["task_revision"]
                         or (
                             job.get("actor") == "policy"
@@ -778,8 +795,11 @@ class AgentService:
                     state = self.load(db)
                     job = state["jobs"][ident]
                     task = self.find(state, "tasks", job["task_id"])
+                    if not self.accounts.is_human(task["uid"]) or not self.accounts.is_human(member["uid"]):
+                        job["human_scope_revoked"] = True
                     if (
                         task["protected"]
+                        or job.get("human_scope_revoked")
                         or task["revision"] != job["task_revision"]
                         or (
                             job.get("actor") == "policy"
@@ -877,7 +897,11 @@ class AgentService:
             observed_accounts = self.accounts.list(state)
             if self.config.get("allow_mutations"):
                 for account in observed_accounts:
-                    if not account["managed"] or account["protected"]:
+                    if (
+                        not account["managed"]
+                        or account["protected"]
+                        or not self.accounts.is_human(account["uid"])
+                    ):
                         continue
                     meta = state["accounts"][account["id"]]
                     if meta.get("rename_recovery_required"):
@@ -905,6 +929,7 @@ class AgentService:
                     and not state["errors"]
                     and fresh
                     and not task["protected"]
+                    and self.accounts.is_human(task["uid"])
                     and task["policy_status"] == "applied"
                     and task.get("cleanup_orphans")
                     and task.get("orphan_cleanup_due")
@@ -934,6 +959,7 @@ class AgentService:
                     task.get("cleanup_handled_revision") == task["revision"]
                     or not task["overdue"]
                     or task["protected"]
+                    or not self.accounts.is_human(task["uid"])
                     or task["policy_status"] != "applied"
                 ):
                     continue

@@ -1,4 +1,5 @@
 from datetime import datetime
+from typing import Literal
 
 from fastapi import APIRouter, Query, Request
 from sqlalchemy import func, select
@@ -70,14 +71,15 @@ def delete_group(ident: int, request: Request, move_to: int = Query(gt=0)):
 
 
 @router.get("/users")
-def users(request: Request):
-    return context(request).users()
+def users(request: Request, scope: Literal["human", "other", "all"] = "human"):
+    return [u for u in context(request).users() if scope == "all" or u["is_human"] == (scope == "human")]
 
 
 @router.patch("/users/{uid}")
 def update_user(uid: int, body: UserPatch, request: Request):
     ctx = context(request)
     ctx.users()
+    ctx.require_human(uid)
     with ctx.lock, ctx.sessions.begin() as db:
         user = db.get(ManagedUser, uid)
         if not user:

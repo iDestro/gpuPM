@@ -80,6 +80,8 @@ const taskFields: Field[] = [
     help: "归属不明的进程不会自动清理",
   },
 ];
+const scopeOptions = [{ label: "human 用户", value: "human" }, { label: "其他用户（只读）", value: "other" }, { label: "全部用户", value: "all" }];
+const classification = { title: "分类", dataIndex: "is_human", render: (v: boolean) => <Tag>{v ? "human" : "其他 · 只读"}</Tag> };
 const label = (value: any) => (value == null ? "无数据" : String(value));
 export function PageHead({
   title,
@@ -209,12 +211,14 @@ export function Tasks() {
     page: 1,
     page_size: 20,
     sort: "priority",
+    scope: "human",
   });
   const [selected, setSelected] = useState<React.Key[]>([]);
   const [merging, setMerging] = useState(false);
+  const [termination, setTermination] = useState<Row | null>(null);
   const q = useData(`/tasks${params(filter)}`, true);
   const groups = useData("/groups");
-  const users = useData("/users");
+  const users = useData(`/users${params({ scope: filter.scope })}`);
   const gpus = useData("/gpus");
   const save = useSave();
   const data = q.data;
@@ -222,7 +226,7 @@ export function Tasks() {
     <>
       <PageHead
         title="GPU 任务"
-        description="严格按业务组 → 用户 → 任务优先级排序；不改变 Linux 或 GPU 调度。"
+        description="默认展示 human 用户任务。其他任务只读，保护任务禁止终止；严格按业务组 → 用户 → 任务优先级排序，不改变 Linux 或 GPU 调度。"
         action={
           <Button
             disabled={selected.length < 2}
@@ -234,6 +238,7 @@ export function Tasks() {
       />
       <Card>
         <Space wrap className="filters">
+          <Select aria-label="任务范围" value={filter.scope} options={scopeOptions} onChange={(scope) => { setFilter({ ...filter, scope, uid: undefined, page: 1 }); setSelected([]); }} />
           <Select
             aria-label="GPU 筛选"
             placeholder="全部 GPU"
@@ -294,6 +299,7 @@ export function Tasks() {
             selectedRowKeys: selected,
             preserveSelectedRowKeys: false,
             onChange: setSelected,
+            getCheckboxProps: (r) => ({ disabled: !r.is_human || r.protected }),
           }}
           scroll={{ x: 1000 }}
           pagination={{
@@ -313,6 +319,7 @@ export function Tasks() {
               render: (v, r) => <Link to={`/tasks/${r.id}`}>{v || r.id}</Link>,
             },
             { title: "用户", dataIndex: "username" },
+            classification,
             {
               title: "三级优先级",
               dataIndex: "priority_tuple",
@@ -343,6 +350,10 @@ export function Tasks() {
               ),
             },
             {
+              title: "操作",
+              render: (_, r) => <Button danger size="small" disabled={!r.is_human || r.protected} onClick={() => setTermination(r)}>终止任务</Button>,
+            },
+            {
               title: "异常",
               dataIndex: "anomalies",
               render: (v) =>
@@ -351,6 +362,7 @@ export function Tasks() {
           ]}
         />
       </Card>
+      {termination ? <TerminationDialog task={termination} onClose={() => setTermination(null)} /> : null}
       {merging ? (
         <PreviewMerge
           selected={selected}
@@ -472,12 +484,12 @@ export function TaskDetail() {
         action={
           <Space>
             <Link to="/tasks">返回列表</Link>
-            <Button onClick={() => setEditing(true)} disabled={!d}>
+            <Button onClick={() => setEditing(true)} disabled={!d || !d.is_human}>
               编辑策略
             </Button>
             <Button
               danger
-              disabled={!d || d.protected}
+              disabled={!d || !d.is_human || d.protected}
               onClick={() => setTermination({})}
             >
               终止整个任务
@@ -492,6 +504,7 @@ export function TaskDetail() {
             <RecordDetail
               row={{
                 用户名: d.username,
+                分类: d.is_human ? "human" : "其他 · 只读",
                 业务组: d.group_id,
                 三级优先级: d.priority_tuple,
                 保护状态: d.protected ? "已保护" : "未保护",
@@ -522,7 +535,7 @@ export function TaskDetail() {
               size="small"
               rowKey={(p: Row) => JSON.stringify(p.identity)}
               dataSource={d.members || []}
-              rowSelection={{ selectedRowKeys: chosen, onChange: setChosen }}
+              rowSelection={{ selectedRowKeys: chosen, onChange: setChosen, getCheckboxProps: () => ({ disabled: !d.is_human || d.protected }) }}
               pagination={false}
               scroll={{ x: 1000 }}
               columns={[
@@ -549,7 +562,7 @@ export function TaskDetail() {
                     <Button
                       danger
                       size="small"
-                      disabled={d.protected || p.status === "Z"}
+                      disabled={!d.is_human || d.protected || p.status === "Z"}
                       onClick={() => setTermination(p.identity)}
                     >
                       终止进程
@@ -560,13 +573,13 @@ export function TaskDetail() {
             />
             <Space>
               <Button
-                disabled={!chosen.length}
+                disabled={!d.is_human || d.protected || !chosen.length}
                 onClick={() => setMembership("split")}
               >
                 拆分所选进程
               </Button>
               <Button
-                disabled={!chosen.length}
+                disabled={!d.is_human || d.protected || !chosen.length}
                 onClick={() => setMembership("exclude")}
               >
                 排除所选归属
@@ -731,7 +744,7 @@ export function BusinessUsers() {
     <>
       <PageHead
         title="用户业务策略"
-        description="每个用户属于一个业务组。修改后现有任务立即采用新的三级优先级。"
+        description="默认展示 human 用户；其他用户只读。每个用户属于一个业务组，修改后现有任务立即采用新的三级优先级。"
       />
       <ErrorAlert error={q.error || save.error} />
       <Card>
@@ -742,6 +755,7 @@ export function BusinessUsers() {
           columns={[
             { title: "用户", dataIndex: "username" },
             { title: "UID", dataIndex: "uid" },
+            classification,
             {
               title: "业务组",
               dataIndex: "group_id",
@@ -753,7 +767,7 @@ export function BusinessUsers() {
             {
               title: "操作",
               render: (_, r) => (
-                <Button size="small" onClick={() => setEdit(r)}>
+                <Button size="small" disabled={!r.is_human} onClick={() => setEdit(r)}>
                   编辑策略
                 </Button>
               ),
@@ -808,7 +822,7 @@ const accountFields: Field[] = [
     name: "groups",
     label: "普通附属系统组",
     type: "tags",
-    help: "敏感组授权由服务器拒绝。改变组关系不会撤销已有会话权限。",
+    help: "human 是人员分类附属组；新账号保留私有主组。敏感组授权由服务器拒绝，组关系变更不撤销已有会话权限。",
   },
   { name: "expires_on", label: "账号到期日期 · Asia/Shanghai", type: "date" },
   {
@@ -820,7 +834,8 @@ const accountFields: Field[] = [
 ];
 export function Accounts() {
   const [state, setState] = useState("active");
-  const q = useData(`/system-users${params({ state })}`);
+  const [scope, setScope] = useState("human");
+  const q = useData(`/system-users${params({ state, scope })}`);
   const systemGroups = useData("/system-groups");
   const groups = useData("/groups");
   const [edit, setEdit] = useState<Row | null>(null);
@@ -847,7 +862,7 @@ export function Accounts() {
     <>
       <PageHead
         title="Linux 本地账号"
-        description="账号软删除保留全部文件与进程。保护账号只读，普通账号需明确纳管后方可操作。"
+        description="human 附属组成员为人员账号；其他与保护账号只读。账号软删除保留全部文件与进程，普通账号需明确纳管后方可操作。"
         action={
           <Button
             type="primary"
@@ -856,7 +871,7 @@ export function Accounts() {
                 priority: 50,
                 require_password_change: true,
                 public_keys: [],
-                groups: [],
+                groups: ["human"],
               })
             }
           >
@@ -866,6 +881,7 @@ export function Accounts() {
       />
       <Card>
         <Space className="filters">
+          <Select aria-label="账号范围" value={scope} options={scopeOptions} onChange={setScope} />
           <Select
             aria-label="账号状态"
             value={state}
@@ -897,6 +913,7 @@ export function Accounts() {
               ),
             },
             { title: "UID / GID", render: (_, r) => `${r.uid} / ${r.gid}` },
+            classification,
             {
               title: "状态",
               dataIndex: "status",
@@ -933,12 +950,12 @@ export function Accounts() {
                 <Space wrap>
                   <Button
                     size="small"
-                    disabled={r.protected || !r.managed || !!r.deleted_at || r.recovery_required}
+                    disabled={!r.is_human || r.protected || !r.managed || !!r.deleted_at || r.recovery_required}
                     onClick={() => setEdit(r)}
                   >
                     编辑
                   </Button>
-                  {!r.managed && !r.protected ? (
+                  {r.is_human && !r.managed && !r.protected ? (
                     <Button
                       size="small"
                       onClick={() => setAction({ row: r, action: "update" })}
@@ -948,7 +965,7 @@ export function Accounts() {
                   ) : null}
                   <Button
                     size="small"
-                    disabled={r.protected || !r.managed || !!r.deleted_at || r.recovery_required}
+                    disabled={!r.is_human || r.protected || !r.managed || !!r.deleted_at || r.recovery_required}
                     onClick={() =>
                       setAction({
                         row: r,
@@ -961,7 +978,7 @@ export function Accounts() {
                   <Button
                     size="small"
                     danger
-                    disabled={r.protected || !r.managed || r.recovery_required}
+                    disabled={!r.is_human || r.protected || !r.managed || r.recovery_required}
                     onClick={() =>
                       setAction({
                         row: r,
@@ -1052,7 +1069,7 @@ export function AccountDetail({
 }) {
   const detail = useData(`/system-users/${initialAccount.id}`);
   const account = detail.data || initialAccount;
-  const immutable = detail.isPending || !account.managed || account.protected || !!account.deleted_at || account.recovery_required;
+  const immutable = detail.isPending || !account.is_human || !account.managed || account.protected || !!account.deleted_at || account.recovery_required;
   const [quotaChange, setQuotaChange] = useState<Row | null>(null);
   const [policyChange, setPolicyChange] = useState<{kind: string, values: Row} | null>(null);
   const [quotaFilesystem, setQuotaFilesystem] = useState<string>();
@@ -1298,7 +1315,7 @@ export function SystemGroups() {
                 <Space>
                   <Button
                     size="small"
-                    disabled={r.protected || !r.managed || r.recovery_required}
+                    disabled={r.name === "human" || r.protected || !r.managed || r.recovery_required}
                     onClick={() => setEdit(r)}
                   >
                     编辑
@@ -1306,7 +1323,7 @@ export function SystemGroups() {
                   <Button
                     size="small"
                     danger
-                    disabled={r.protected || !r.managed || !!r.members?.length}
+                    disabled={r.name === "human" || r.protected || !r.managed || !!r.members?.length}
                     onClick={() =>
                       setAction({ ...r, action: "delete", changes: {} })
                     }

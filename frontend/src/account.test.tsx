@@ -6,7 +6,7 @@ import { MemoryRouter } from 'react-router-dom';
 import { queryClient, setSession } from './api';
 import { AccountDetail } from './pages';
 const account: Record<string, any> = {id:'alice',username:'alice',uid:1001,gid:1001,home:'/home/alice',data_dir:'/data/alice',
-  groups:['alice'],shell:'/bin/bash',status:'active',managed:true,protected:false,disabled:false,
+  groups:['alice'],shell:'/bin/bash',status:'active',managed:true,is_human:true,protected:false,disabled:false,
   deleted_at:null,expires_on:null,require_password_change:false,revision:1,priority:73,group_id:2};
 function setup(row=account, quotaRows: Record<string, any>[] = [{filesystem_id:"fs",soft_bytes:128,hard_bytes:4096,soft_inodes:20,hard_inodes:40,grace_seconds:60}]) {
   setSession({username:'admin',csrf_token:'test-csrf'});
@@ -58,7 +58,7 @@ test('GPU worker detail identifies device and per-process memory',async()=>{
   const { Routes, Route } = await import('react-router-dom');
   vi.stubGlobal('fetch',vi.fn().mockImplementation(async(url:string)=>new Response(JSON.stringify(
     url.endsWith('/gpus') ? {items:[{uuid:'gpu-one',index:0,name:'GPU test'}]} :
-    {id:'task',name:'training',uid:1001,username:'alice',status:'running',protected:false,revision:1,
+    {id:'task',name:'training',uid:1001,username:'alice',status:'running',is_human:true,protected:false,revision:1,
      members:[{identity:{boot_id:'boot',pid:4001,start_ticks:5},pid:4001,ppid:4000,command:'train',status:'S',gpu_memory:{'gpu-one':2*1024**3}},
               {identity:{boot_id:'boot',pid:4002,start_ticks:6},pid:4002,ppid:4001,command:'loader',status:'S',gpu_memory:{}}],context:[]}
   ))));
@@ -89,4 +89,22 @@ test('account awaiting root recovery cannot change credentials',async()=>{
   await screen.findByText('账号变更尚未完成，请由服务器管理员核对目录和登录状态后恢复管理。');
   await screen.findByText('5');
   expect(screen.getByRole('button',{name:'重置密码'})).toBeDisabled();
+});
+
+test('nonhuman account details remain readonly',async()=>{
+  setup({...account,is_human:false});
+  await screen.findByText('5');
+  for (const name of ['重置密码','密码策略','配置配额']) expect(screen.getByRole('button',{name})).toBeDisabled();
+});
+
+test.each([false,true])('readonly task disables every mutation when human=%s',async(is_human)=>{
+  const { TaskDetail } = await import('./pages');
+  const { Routes, Route } = await import('react-router-dom');
+  vi.stubGlobal('fetch',vi.fn(async(url:string)=>new Response(JSON.stringify(url.endsWith('/gpus') ? {items:[]} :
+    {id:'task',name:'readonly',is_human,protected:is_human,members:[{identity:{pid:1},pid:1,ppid:0,status:'S'}],context:[]}))));
+  render(<MemoryRouter initialEntries={['/tasks/task']}><QueryClientProvider client={queryClient}><Routes><Route path='/tasks/:id' element={<TaskDetail/>}/></Routes></QueryClientProvider></MemoryRouter>);
+  await screen.findByText('readonly');
+  expect((screen.getByRole('button',{name:'编辑策略'}) as HTMLButtonElement).disabled).toBe(!is_human);
+  for(const name of ['终止整个任务','终止进程','拆分所选进程','排除所选归属']) expect(screen.getByRole('button',{name})).toBeDisabled();
+  expect(screen.getAllByRole('checkbox').every(input=>(input as HTMLInputElement).disabled)).toBe(true);
 });

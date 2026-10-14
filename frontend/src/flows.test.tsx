@@ -53,7 +53,7 @@ test("termination requires server preview then a reason; it uses the preview tok
   render(
     <QueryClientProvider client={queryClient}>
       <TerminationDialog
-        task={{ id: "t1", name: "训练任务" }}
+        task={{ id: "t1", name: "训练任务", is_human: true }}
         onClose={() => {}}
       />
     </QueryClientProvider>,
@@ -113,7 +113,7 @@ test("server preview error prevents termination and remains visible", async () =
   );
   render(
     <QueryClientProvider client={queryClient}>
-      <TerminationDialog task={{ id: "protected" }} onClose={() => {}} />
+      <TerminationDialog task={{ id: "protected", is_human: true, protected: true }} onClose={() => {}} />
     </QueryClientProvider>,
   );
   await screen.findByText("任务保护已开启");

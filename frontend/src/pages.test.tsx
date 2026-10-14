@@ -4,7 +4,7 @@ import userEvent from "@testing-library/user-event";
 import { QueryClientProvider } from "@tanstack/react-query";
 import { MemoryRouter } from "react-router-dom";
 import { queryClient, setSession } from "./api";
-import { Accounts, Storage } from "./pages";
+import { Accounts, Storage, Tasks, BusinessUsers, SystemGroups } from "./pages";
 import App from "./App";
 const account = {
   id: "alice",
@@ -13,6 +13,7 @@ const account = {
   gid: 1001,
   managed: true,
   protected: false,
+  is_human: true,
   status: "active",
   revision: 7,
   priority: 50,
@@ -181,10 +182,52 @@ test("account creation supports SSH public key without requiring an initial pass
   expect(body.public_keys).toHaveLength(1);
   expect(body.password).toBeUndefined();
   expect(body.require_password_change).toBe(true);
-});
+  expect(body.groups).toEqual(["human"]);
+}, 10000);
 
 test("storage cold cache shows collecting state", async () => {
   vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify({status:"pending",collected_at:null,stale:true,filesystems:[],users:[],shares:[],alerts:[]}))));
   renderPage(<Storage />);
   expect(await screen.findByText("正在统计存储用量，完成后自动更新。")).toBeInTheDocument();
+});
+
+test("accounts default to human scope and other accounts remain readonly", async () => {
+  const request = vi.fn(async (url: string) => new Response(JSON.stringify(url.startsWith("/api/system-users") ? [{...account,is_human:false}] : [])));
+  vi.stubGlobal("fetch", request);
+  renderPage(<Accounts />);
+  expect(await screen.findByRole("button", {name:/编\s*辑/})).toBeDisabled();
+  expect(screen.getByRole("button", {name:/停\s*用/})).toBeDisabled();
+  expect(request.mock.calls[0][0]).toContain("scope=human");
+  await userEvent.click(screen.getByRole("combobox", {name:"账号范围"}));
+  await userEvent.click(screen.getByText("其他用户（只读）", {exact:true}));
+  await waitFor(()=>expect(request.mock.calls.some(([url])=>url.includes("scope=other"))).toBe(true));
+  await userEvent.click(screen.getByRole("combobox", {name:"账号范围"}));
+  await userEvent.click(screen.getByText("全部用户", {exact:true}));
+  await waitFor(()=>expect(request.mock.calls.some(([url])=>url.includes("scope=all"))).toBe(true));
+}, 10000);
+test("task list defaults to human and opens existing termination preview", async () => {
+  const request = vi.fn(async (url: string) => new Response(JSON.stringify(url.startsWith("/api/tasks?") ? {items:[{id:"task",name:"training",is_human:true,protected:false},{id:"service",name:"service",is_human:false}],total:2} : url.endsWith("termination-preview") ? {token:"kill-token",expires_at:"2099-01-01T00:00:00Z",members:[]} : [])));
+  vi.stubGlobal("fetch", request);
+  renderPage(<Tasks />, "/tasks");
+  const buttons = await screen.findAllByRole("button", {name:"终止任务"});
+  expect(buttons[0]).toBeEnabled();
+  expect(buttons[1]).toBeDisabled();
+  expect(request.mock.calls[0][0]).toContain("scope=human");
+  expect(request.mock.calls.some(([url]) => url === "/api/users?scope=human")).toBe(true);
+  await userEvent.click(buttons[0]);
+  await screen.findByText("终止范围预览");
+  await waitFor(()=>expect(request.mock.calls.some(([url])=>url.endsWith("/task/termination-preview"))).toBe(true));
+  expect(request.mock.calls.some(([url])=>url.endsWith("/terminate"))).toBe(false);
+});
+test("other business users cannot edit policy", async () => {
+  vi.stubGlobal("fetch", vi.fn(async (url:string)=>new Response(JSON.stringify(url === "/api/users" ? [{uid:1,username:"service",is_human:false}] : []))));
+  renderPage(<BusinessUsers />, "/users");
+  expect(await screen.findByRole("button",{name:"编辑策略"})).toBeDisabled();
+});
+
+test("human system group is readonly even without a protected flag", async () => {
+  vi.stubGlobal("fetch",vi.fn(async()=>new Response(JSON.stringify([{id:"human",name:"human",managed:true,protected:false,members:[]}]))));
+  renderPage(<SystemGroups />);
+  expect(await screen.findByRole("button",{name:/编\s*辑/})).toBeDisabled();
+  expect(screen.getByRole("button",{name:"删除空组"})).toBeDisabled();
 });

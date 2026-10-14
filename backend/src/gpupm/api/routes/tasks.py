@@ -53,6 +53,7 @@ def gpus(request: Request):
 @router.get("/tasks")
 def tasks(
     request: Request,
+    scope: Literal["human", "other", "all"] = "human",
     gpu: str | None = None,
     uid: int | None = None,
     group_id: int | None = None,
@@ -62,6 +63,7 @@ def tasks(
     page_size: int = Query(default=50, ge=1, le=200),
 ):
     result, snap = context(request).tasks()
+    result = [t for t in result if scope == "all" or t["is_human"] == (scope == "human")]
     if uid is not None:
         result = [t for t in result if t["uid"] == uid]
     if group_id is not None:
@@ -102,6 +104,7 @@ def update_task(ident: str, body: TaskPatch, request: Request):
         raise DomainError("invalid_value", "任务配置不能为空", 422)
     with ctx.lock:
         before = ctx.task(ident)
+        ctx.require_human(before["uid"])
         if before["revision"] != revision:
             raise DomainError("revision_conflict", "任务版本已改变")
         with ctx.sessions.begin() as db:
@@ -142,6 +145,8 @@ def update_task(ident: str, body: TaskPatch, request: Request):
 
 @router.post("/tasks/merge")
 def merge(body: Merge, request: Request):
+    for ident in body.task_ids:
+        context(request).require_human(context(request).task(ident)["uid"])
     if len(set(body.task_ids)) != len(body.task_ids):
         raise DomainError("invalid_grouping", "不能重复选择同一任务", 422)
     return agent_mutation(
@@ -155,6 +160,7 @@ def merge(body: Merge, request: Request):
 
 @router.post("/tasks/{ident}/split")
 def split(ident: str, body: Split, request: Request):
+    context(request).require_human(context(request).task(ident)["uid"])
     return agent_mutation(
         request,
         "apply_membership",
@@ -166,6 +172,7 @@ def split(ident: str, body: Split, request: Request):
 
 @router.patch("/tasks/{ident}/members")
 def members(ident: str, body: Membership, request: Request):
+    context(request).require_human(context(request).task(ident)["uid"])
     return agent_mutation(
         request,
         "apply_membership",
@@ -179,6 +186,7 @@ def members(ident: str, body: Membership, request: Request):
 def preview(ident: str, body: TerminationPreview, request: Request):
     ctx = context(request)
     selected = ctx.task(ident)
+    ctx.require_human(selected["uid"])
     if selected["policy_status"] != "applied":
         raise DomainError("policy_not_applied", "策略尚未生效，请先恢复一致状态")
     snap = ctx.snapshot(force=True)
@@ -189,6 +197,7 @@ def preview(ident: str, body: TerminationPreview, request: Request):
 
 @router.post("/tasks/{ident}/terminate")
 def terminate(ident: str, body: Terminate, request: Request):
+    context(request).require_human(context(request).task(ident)["uid"])
     return agent_mutation(
         request, "execute_termination", dict(task_id=ident, **body.model_dump()), "task.terminate", ident
     )

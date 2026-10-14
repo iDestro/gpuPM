@@ -510,7 +510,11 @@ class Storage:
             merged = dict(existing or {})
             merged.update(changes)
             name = validate_name(merged["name"])
+            if "human" in {merged["reader_group"], merged["writer_group"]}:
+                raise DomainError("protected_group", "human is a classification group", 403)
             validate_groups([merged["reader_group"], merged["writer_group"]])
+            for field in ("reader_group", "writer_group"):
+                service.accounts.assert_human_group(merged[field])
             if merged["reader_group"] == merged["writer_group"]:
                 raise DomainError("invalid_share", "reader and writer groups must differ", 422)
             if existing and name != existing["name"]:

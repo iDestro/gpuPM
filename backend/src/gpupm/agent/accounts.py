@@ -279,6 +279,38 @@ class Accounts:
         names = {line.split(":")[0] for line in Path("/etc/passwd").read_text().splitlines() if ":" in line}
         return [entry for entry in pwd.getpwall() if entry.pw_name in names]
 
+    def is_human(self, uid):
+        try:
+            group = grp.getgrnam("human")
+        except KeyError:
+            return False
+        return any(
+            entry.pw_uid == uid and (entry.pw_gid == group.gr_gid or entry.pw_name in group.gr_mem)
+            for entry in self.local_entries()
+        )
+
+    def ensure_human_group(self):
+        try:
+            grp.getgrnam("human")
+        except KeyError:
+            self.run(["groupadd", "human"])
+        validate_groups(["human"])
+        local = {line.split(":")[0] for line in Path("/etc/group").read_text().splitlines() if ":" in line}
+        if "human" not in local:
+            raise DomainError("protected_group", "human must be an ordinary local group", 403)
+
+    def assert_human_group(self, name):
+        group = grp.getgrnam(name)
+        members = set(group.gr_mem)
+        members.update(entry.pw_name for entry in pwd.getpwall() if entry.pw_gid == group.gr_gid)
+        for member in members:
+            try:
+                uid = pwd.getpwnam(member).pw_uid
+            except KeyError as exc:
+                raise DomainError("non_human_readonly", "group contains an unknown account", 403) from exc
+            if not self.is_human(uid):
+                raise DomainError("non_human_readonly", "group contains non-human accounts", 403)
+
     def observe_identities(self, state, entries):
         observations = state.setdefault("account_observations", {})
         present = {str(entry.pw_uid): entry for entry in entries}
@@ -418,6 +450,7 @@ class Accounts:
                     home=entry.pw_dir,
                     data_dir=meta.get("data_dir"),
                     managed=bool(meta.get("managed")),
+                    is_human=self.is_human(entry.pw_uid),
                     protected=self.protected(entry),
                     disabled=bool(meta.get("disabled")),
                     deleted_at=meta.get("deleted_at"),
@@ -443,7 +476,7 @@ class Accounts:
                 name=g.gr_name,
                 gid=g.gr_gid,
                 members=sorted(g.gr_mem),
-                protected=g.gr_gid < 1000 or g.gr_name in SENSITIVE_GROUPS,
+                protected=g.gr_gid < 1000 or g.gr_name in SENSITIVE_GROUPS or g.gr_name == "human",
                 managed=g.gr_name in state["groups"],
                 revision=state["groups"].get(g.gr_name, {}).get("revision", 1),
             )
@@ -477,6 +510,8 @@ class Accounts:
                 "native account lifecycle changed; root reconciliation required before management",
                 403,
             )
+        if not self.is_human(account["uid"]):
+            raise DomainError("non_human_readonly", "only human accounts are editable", 403)
         if account["protected"]:
             raise DomainError("protected_account", "account is protected", 403)
         if not account["managed"] and not adopt:
@@ -889,7 +924,10 @@ class Accounts:
                 )
             validate_groups([changes["primary_group"]])
         if "groups" in changes:
-            validate_groups(changes["groups"])
+            groups = changes["groups"]
+            if action == "create" and isinstance(groups, list):
+                groups = [name for name in groups if name != "human"]
+            validate_groups(groups)
         if "public_keys" in changes:
             validate_keys(changes["public_keys"])
         if "expires_on" in changes and changes["expires_on"] is not None:
@@ -921,8 +959,11 @@ class Accounts:
             data = data_base / name
             if os.path.lexists(home) or os.path.lexists(data):
                 raise DomainError("path_conflict", "home or data path already exists")
+            self.ensure_human_group()
             argv = [
                 "useradd",
+                "--groups",
+                "human",
                 "--user-group",
                 "--no-create-home",
                 "--shell",
@@ -1073,9 +1114,17 @@ class Accounts:
             if "public_keys" in changes:
                 self.write_files(account, changes["public_keys"])
         if "primary_group" in changes:
+            self.run(["usermod", "--append", "--groups", "human", account["username"]])
             self.run(["usermod", "--gid", changes["primary_group"], account["username"]])
         if "groups" in changes:
-            self.run(["usermod", "--groups", ",".join(changes["groups"]), account["username"]])
+            self.run(
+                [
+                    "usermod",
+                    "--groups",
+                    ",".join(sorted(set(changes["groups"]) | {"human"})),
+                    account["username"],
+                ]
+            )
         if "shell" in changes:
             if changes["shell"] not in {"/bin/bash", "/bin/sh", "/usr/sbin/nologin"}:
                 raise DomainError("invalid_shell", "shell must be an allowed login shell", 422)

@@ -105,7 +105,7 @@ class Context:
             snapshot = self.snapshot(force=True)
             if not snapshot["stale"]:
                 for task in snapshot.get("tasks", []):
-                    if task["status"] != "running":
+                    if task["status"] != "running" or not task.get("is_human", False):
                         continue
                     with self.sessions() as db:
                         existing = db.get(TaskConfig, task["id"])
@@ -227,7 +227,16 @@ class Context:
                         )
                     )
         with self.sessions() as db:
-            return [columns(u) for u in db.scalars(select(ManagedUser).order_by(ManagedUser.uid))]
+            human_uids = {a["uid"] for a in snap.get("accounts", []) if a.get("is_human", False)}
+            return [
+                dict(columns(u), is_human=u.uid in human_uids)
+                for u in db.scalars(select(ManagedUser).order_by(ManagedUser.uid))
+            ]
+
+    def require_human(self, uid):
+        accounts = self.agent.call("list_accounts")
+        if not any(a["uid"] == uid and a.get("is_human", False) for a in accounts):
+            raise DomainError("non_human_readonly", "非 human 账号及其任务仅供查看", 403)
 
     def tasks(self):
         snap = self.snapshot()
@@ -240,6 +249,7 @@ class Context:
             settings = self.settings()
             for original in snap["tasks"]:
                 task = dict(original)
+                task["is_human"] = bool(original.get("is_human", False))
                 user = users[task["uid"]]
                 group = groups[user.group_id]
                 policy = db.get(TaskConfig, task["id"])

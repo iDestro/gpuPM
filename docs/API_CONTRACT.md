@@ -48,3 +48,8 @@ Storage RPC serves cache or status:pending with collected_at:null; recursive col
 apply_task_policy returns awaiting_sync with no confirmed revision. Only the exact revision heartbeat after API persistence enables automatic handling; a previous heartbeat cannot authorize a new policy. Native protection always remains visible even if requested Web policy clears it. Runtime settings affect the process/storage cycle and future termination jobs; policy freshness is max(root limit, 3 × configured scan interval), default 30 seconds.
 
 Process context contains observed ancestors up to32 levels, never signal targets. D-state members expose uninterruptible_since/uninterruptible_seconds; a30-second sustained condition is informational only. Account previews include current activity, paths and native-operation impact. Primary-group changes use native usermod rules, which may update old-group-owned home files; other data paths retain ownership.
+
+
+## human 范围
+
+GET /api/tasks、/api/system-users、/api/users 支持 scope=human|other|all，默认 human；独立账号/任务详情仍可查看 other。账号、任务与业务用户响应包含 is_human。GPU/总览统计仍包括全部任务。非 human 修改返回403/non_human_readonly；human 组自身只读，普通账号编辑保留 human 附属组。成员资格由 agent 读取原生 Linux 组，操作与后台执行时重新核验，不相信客户端字段。

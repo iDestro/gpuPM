@@ -186,6 +186,7 @@ def test_preview_cannot_be_submitted_for_different_task(tmp_path):
         dict(store_path=str(tmp_path / "agent.sqlite"), allow_mutations=True),
         collector=lambda: ([], [process(2, 1, True), process(3, 1, True)], []),
     )
+    service.accounts.is_human = lambda uid: uid == 1000
     snapshot = service.call("snapshot")
     tasks = snapshot["tasks"]
     service.call(
@@ -267,6 +268,7 @@ def test_softdelete_retains_identity_and_files_and_other_restrictions():
 
     calls = []
     accounts = Accounts({}, lambda argv, **kwargs: calls.append(argv) or "")
+    accounts.is_human = lambda uid: uid == 1000
     account = dict(
         id="1000",
         uid=1000,
@@ -312,6 +314,7 @@ def test_policy_restart_requires_new_heartbeat(tmp_path):
         return [], [process(3, 2, True)], []
 
     service = AgentService(config, collector=collector)
+    service.accounts.is_human = lambda uid: uid == 1000
     task = service.call("snapshot")["tasks"][0]
     task = service.call(
         "apply_task_policy",
@@ -319,6 +322,7 @@ def test_policy_restart_requires_new_heartbeat(tmp_path):
     )
     service.call("heartbeat", {"policy_versions": {task["id"]: task["revision"]}})
     restarted = AgentService(config, collector=collector)
+    restarted.accounts.is_human = lambda uid: uid == 1000
     assert restarted.call("snapshot")["tasks"][0]["policy_status"] == "awaiting_sync"
     restarted.call("heartbeat", {"policy_versions": {task["id"]: task["revision"] - 1}})
     assert restarted.call("snapshot")["tasks"][0]["policy_status"] == "awaiting_sync"
@@ -469,6 +473,7 @@ def test_password_reset_keeps_platform_login_lock(monkeypatch):
         return ""
 
     accounts = module.Accounts({}, run)
+    accounts.is_human = lambda uid: uid == 1000
     accounts.find = lambda state, ident: dict(account, revision=meta["revision"])
     accounts.shadow_baseline = lambda name: dict(native)
     monkeypatch.setattr(module, "quality_password", lambda password, name: None)
@@ -480,6 +485,7 @@ def test_empty_initial_policy_registration_is_confirmed_only_by_agent(tmp_path):
     service = AgentService(
         {"store_path": str(tmp_path / "agent.sqlite")}, collector=lambda: ([], [process(10, 1, True)], [])
     )
+    service.accounts.is_human = lambda uid: uid == 1000
     task = service.call("snapshot")["tasks"][0]
     service.call("heartbeat", {"policy_versions": {task["id"]: task["revision"]}})
     assert service.call("snapshot")["tasks"][0]["policy_status"] == "awaiting_sync"
@@ -507,6 +513,7 @@ def test_cleanup_tick_waits_for_latest_policy_and_records_job(tmp_path):
         collector=lambda: ([], available, []),
         signaler=lambda identity, sig, uids: "exited",
     )
+    service.accounts.is_human = lambda uid: uid == 1000
     service.accounts.list = lambda state: []
     task = service.call("snapshot")["tasks"][0]
     service.call(
@@ -539,6 +546,7 @@ def test_job_records_residual_process_instead_of_signal_success(tmp_path):
         signaler=lambda identity, sig, uids: "signaled",
         process_checker=lambda identity: "alive",
     )
+    service.accounts.is_human = lambda uid: uid == 1000
     task = service.call("snapshot")["tasks"][0]
     preview = service.call("preview_termination", {"task_id": task["id"]})
     job = service.call(
@@ -687,11 +695,15 @@ def test_primary_group_change_uses_validated_native_gid_without_directory_migrat
         baseline=dict(shell="/bin/bash", password="hash", expire="", restricted=False),
     )
     accounts = module.Accounts({}, lambda argv, **kwargs: calls.append(argv) or "")
+    accounts.is_human = lambda uid: uid == 1000
     accounts.find = lambda state, ident: dict(account, revision=meta["revision"])
     accounts.shadow_baseline = lambda name: dict(meta["baseline"])
     monkeypatch.setattr(module.grp, "getgrnam", lambda name: types.SimpleNamespace(gr_gid=2000, gr_name=name))
     accounts.execute({"accounts": {"1000": meta}}, "update", "1000", {"primary_group": "research"})
-    assert calls == [["usermod", "--gid", "research", "alice"]]
+    assert calls == [
+        ["usermod", "--append", "--groups", "human", "alice"],
+        ["usermod", "--gid", "research", "alice"],
+    ]
     assert account["home"] == "/home/alice" and account["data_dir"] == "/data/alice"
     with pytest.raises(DomainError):
         accounts.execute({"accounts": {"1000": meta}}, "update", "1000", {"primary_group": "sudo"})
@@ -833,6 +845,7 @@ def test_external_login_restrictions_before_first_disable_are_retained():
         return ""
 
     accounts = module.Accounts({}, run)
+    accounts.is_human = lambda uid: uid == 1000
     accounts.find = lambda state, ident: dict(account, revision=meta["revision"])
     accounts.shadow_baseline = lambda name: dict(native)
     state = {"accounts": {"1000": meta}}
@@ -866,6 +879,7 @@ def test_password_reset_preserves_new_external_lock_after_adoption(monkeypatch):
         return ""
 
     accounts = module.Accounts({}, run)
+    accounts.is_human = lambda uid: uid == 1000
     accounts.find = lambda state, ident: dict(account, revision=meta["revision"])
     accounts.shadow_baseline = lambda name: dict(native)
     monkeypatch.setattr(module, "quality_password", lambda *args: None)
@@ -1029,6 +1043,7 @@ def test_new_policy_requires_its_own_persisted_revision_heartbeat(tmp_path):
         signaler=lambda *args: "exited",
         process_checker=lambda identity: "exited",
     )
+    service.accounts.is_human = lambda uid: uid == 1000
     service.accounts.list = lambda state: []
     task = service.call("snapshot")["tasks"][0]
     old = service.call(
@@ -1266,3 +1281,215 @@ def test_failed_rename_retains_recovery_guard_and_tick_cannot_unlock(tmp_path, m
     with pytest.raises(DomainError) as exc:
         accounts.writable(state, account["id"])
     assert exc.value.code == "rename_recovery_required"
+
+
+def test_human_identity_uses_exact_native_group_membership(monkeypatch):
+    import types
+    from gpupm.agent import accounts as module
+
+    entries = [
+        types.SimpleNamespace(pw_name=name, pw_uid=uid, pw_gid=gid)
+        for name, uid, gid in [("primary", 1001, 2000), ("member", 1002, 1002), ("other", 1003, 1003)]
+    ]
+    accounts = module.Accounts({})
+    accounts.local_entries = lambda: entries
+    monkeypatch.setattr(
+        module.grp, "getgrnam", lambda name: types.SimpleNamespace(gr_gid=2000, gr_mem=["member"])
+    )
+    assert accounts.is_human(1001)
+    assert accounts.is_human(1002)
+    assert not accounts.is_human(1003)
+    assert not accounts.is_human(9999)
+    monkeypatch.setattr(module.grp, "getgrnam", lambda name: (_ for _ in ()).throw(KeyError(name)))
+    assert not accounts.is_human(1001)
+
+
+def test_native_nonhuman_task_policy_and_termination_are_readonly(tmp_path):
+    service = AgentService(
+        {"store_path": str(tmp_path / "agent.sqlite"), "allow_mutations": True},
+        collector=lambda: ([], [process(20, 2, True)], []),
+    )
+    service.accounts.is_human = lambda uid: False
+    task = service.call("snapshot")["tasks"][0]
+    assert task["is_human"] is False
+    for method, params in [
+        ("apply_task_policy", dict(task_id=task["id"], revision=task["revision"], policy={})),
+        ("preview_termination", dict(task_id=task["id"])),
+        (
+            "apply_membership",
+            dict(
+                task_id=task["id"],
+                revision=task["revision"],
+                action="exclude",
+                excluded_identities=[task["members"][0]["identity"]],
+            ),
+        ),
+    ]:
+        with pytest.raises(DomainError) as error:
+            service.call(method, params)
+        assert error.value.code == "non_human_readonly"
+
+
+def test_nonhuman_account_cannot_be_adopted(monkeypatch):
+    from gpupm.agent.accounts import Accounts
+
+    accounts = Accounts({})
+    accounts.find = lambda state, ident: dict(
+        id="1001", uid=1001, username="ordinary", protected=False, managed=False, is_human=True
+    )
+    accounts.is_human = lambda uid: False
+    with pytest.raises(DomainError) as error:
+        accounts.writable({"accounts": {}}, "1001", adopt=True)
+    assert error.value.code == "non_human_readonly"
+
+
+def test_job_stops_remaining_signals_after_human_membership_removed(tmp_path):
+    import signal
+
+    membership = {"active": True}
+    signals = []
+
+    def signaler(identity, sig, uids):
+        signals.append(sig)
+        membership["active"] = False
+        return "signaled"
+
+    service = AgentService(
+        {
+            "store_path": str(tmp_path / "agent.sqlite"),
+            "term_grace_seconds": 0,
+            "termination_recheck_seconds": 0,
+        },
+        collector=lambda: ([], [process(20, 2, True), process(21, 20)], []),
+        signaler=signaler,
+        process_checker=lambda identity: "alive",
+    )
+    service.accounts.is_human = lambda uid: uid == 1000 and membership["active"]
+    task = service.call("snapshot")["tasks"][0]
+    with service.database() as db:
+        state = service.load(db)
+        state["jobs"]["queued"] = dict(
+            id="queued",
+            task_id=task["id"],
+            task_revision=task["revision"],
+            targets=task["members"],
+            actor="admin",
+        )
+        service.save(db, state)
+    service.execute_job("queued")
+    assert signals == [signal.SIGTERM]
+    with service.database() as db:
+        results = service.load(db)["jobs"]["queued"]["results"]
+        assert results[1]["term"] == "scope_changed"
+        assert results[0]["kill"] == "scope_changed"
+
+
+def test_creation_accepts_implicit_missing_human_but_validates_other_groups(monkeypatch):
+    from gpupm.agent import accounts as module
+
+    accounts = module.Accounts({})
+    monkeypatch.setattr(module.pwd, "getpwnam", lambda name: (_ for _ in ()).throw(KeyError(name)))
+    monkeypatch.setattr(module.grp, "getgrnam", lambda name: (_ for _ in ()).throw(KeyError(name)))
+    monkeypatch.setattr(module, "quality_password", lambda *args: None)
+
+    def provisioning_boundary(path):
+        raise DomainError("provisioning_boundary", "reached provisioning")
+
+    monkeypatch.setattr(module, "secure_directory", provisioning_boundary)
+    for groups, expected in [
+        (["human"], "provisioning_boundary"),
+        (["human", "missing"], "group_missing"),
+        (["human", "sudo"], "protected_group"),
+    ]:
+        with pytest.raises(DomainError) as error:
+            accounts.execute(
+                {"accounts": {}},
+                "create",
+                None,
+                {"username": "newperson", "password": "long test password", "groups": groups},
+            )
+        assert error.value.code == expected
+
+
+def test_human_group_creation_checks_native_gid_and_locality(monkeypatch):
+    import types
+    from gpupm.agent import accounts as module
+
+    native = {}
+    commands = []
+
+    def lookup(name):
+        if name not in native:
+            raise KeyError(name)
+        return native[name]
+
+    def run(argv):
+        commands.append(argv)
+        native["human"] = types.SimpleNamespace(gr_name="human", gr_gid=2000)
+
+    accounts = module.Accounts({}, run)
+    monkeypatch.setattr(module.grp, "getgrnam", lookup)
+    monkeypatch.setattr(module.Path, "read_text", lambda self: "human:x:2000:\n")
+    accounts.ensure_human_group()
+    accounts.ensure_human_group()
+    assert commands == [["groupadd", "human"]]
+    native["human"].gr_gid = 10
+    with pytest.raises(DomainError, match="system group"):
+        accounts.ensure_human_group()
+    native["human"].gr_gid = 2000
+    monkeypatch.setattr(module.Path, "read_text", lambda self: "")
+    with pytest.raises(DomainError, match="local group"):
+        accounts.ensure_human_group()
+
+
+def test_native_group_scope_includes_primary_nonhuman_members(monkeypatch):
+    import types
+    from gpupm.agent import accounts as module
+
+    accounts = module.Accounts({})
+    accounts.is_human = lambda uid: uid == 1001
+    entries = [
+        types.SimpleNamespace(pw_name="humanuser", pw_uid=1001, pw_gid=3000),
+        types.SimpleNamespace(pw_name="other", pw_uid=1002, pw_gid=2000),
+    ]
+    monkeypatch.setattr(
+        module.grp, "getgrnam", lambda name: types.SimpleNamespace(gr_gid=2000, gr_mem=["humanuser"])
+    )
+    monkeypatch.setattr(module.pwd, "getpwall", lambda: entries)
+    monkeypatch.setattr(module.pwd, "getpwnam", lambda name: next(e for e in entries if e.pw_name == name))
+    with pytest.raises(DomainError) as error:
+        accounts.assert_human_group("research")
+    assert error.value.code == "non_human_readonly"
+
+
+def test_nonhuman_expiry_and_account_tick_are_skipped(tmp_path):
+    service = AgentService(
+        {"store_path": str(tmp_path / "agent.sqlite"), "allow_mutations": True},
+        collector=lambda: ([], [process(20, 2, True)], []),
+        signaler=lambda *args: pytest.fail("must not signal nonhuman"),
+    )
+    service.accounts.is_human = lambda uid: uid == 1000
+    task = service.call("snapshot")["tasks"][0]
+    task = service.call(
+        "apply_task_policy",
+        {
+            "task_id": task["id"],
+            "revision": task["revision"],
+            "policy": {
+                "expires_at": "2020-01-01T00:00:00+00:00",
+                "deadline_action": "terminate",
+                "cleanup_orphans": True,
+            },
+        },
+    )
+    service.call("heartbeat", {"policy_versions": {task["id"]: task["revision"]}})
+    service.accounts.is_human = lambda uid: False
+    service.accounts.list = lambda state: [dict(id="1000", uid=1000, managed=True, protected=False)]
+    service.accounts.apply_login = lambda *args: pytest.fail("must not apply nonhuman account policy")
+    with service.database() as db:
+        state = service.load(db)
+        state["accounts"]["1000"] = dict(disabled=True, agent_restricted=False)
+        service.save(db, state)
+    service.tick()
+    with service.database() as db:
+        assert not service.load(db)["jobs"]

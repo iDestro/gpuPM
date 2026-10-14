@@ -5,6 +5,7 @@
 - React + TypeScript + Ant Design + TanStack Query
 - Python 3.12 + FastAPI + SQLite
 - 普通权限 Web API；独立 root agent；Unix socket 通信
+- 以 Linux `human` 组成员作为管理范围，其他账号/任务只读；新建用户默认加入 human 附属组
 - 数据目录为 `/data/<用户名>`，私人目录默认 0700
 - 用户删除仅软删除，账号和全部文件原地保留；不自动结束既有活动
 

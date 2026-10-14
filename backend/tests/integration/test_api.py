@@ -335,3 +335,54 @@ def test_quota_edit_does_not_reset_grace_when_omitted(client, app):
     )
     assert applied.status_code == 200, applied.text
     assert "grace_seconds" not in applied.json()
+
+
+def mark_bob_other(app):
+    original = app.state.ctx.agent.call
+
+    def call(method, params=None):
+        result = original(method, params)
+        if method == "snapshot":
+            for row in result["accounts"] + result["tasks"]:
+                row["is_human"] = row["uid"] != 1002
+        elif method == "list_accounts":
+            for row in result:
+                row["is_human"] = row["uid"] != 1002
+        return result
+
+    app.state.ctx.agent.call = call
+    app.state.ctx.invalidate()
+
+
+def test_human_lists_default_and_other_remains_visible(client, app):
+    login(client)
+    mark_bob_other(app)
+    tasks = client.get("/api/tasks").json()["items"]
+    assert tasks and all(t["uid"] != 1002 for t in tasks)
+    other = client.get("/api/tasks?scope=other").json()["items"]
+    assert other and all(t["uid"] == 1002 for t in other)
+    assert len(client.get("/api/tasks?scope=all").json()["items"]) == len(tasks) + len(other)
+    assert all(a["uid"] != 1002 for a in client.get("/api/system-users").json())
+    assert client.get("/api/system-users?scope=other").json()[0]["uid"] == 1002
+    assert client.get("/api/system-users/demo-bob").status_code == 200
+    assert all(u["is_human"] for u in client.get("/api/users").json())
+    assert client.get("/api/tasks?scope=invalid").status_code == 422
+
+
+def test_other_business_and_task_policy_rejected_before_persistence(client, app):
+    headers = login(client)
+    mark_bob_other(app)
+    task = next(t for t in client.get("/api/tasks?scope=all").json()["items"] if t["uid"] == 1002)
+    response = client.patch("/api/users/1002", json={"priority": 99}, headers=headers)
+    assert response.status_code == 403, response.text
+    assert response.json()["detail"]["code"] == "non_human_readonly"
+    response = client.patch(
+        f"/api/tasks/{task['id']}", json={"revision": task["revision"], "priority": 99}, headers=headers
+    )
+    assert response.status_code == 403, response.text
+    assert response.json()["detail"]["code"] == "non_human_readonly"
+    assert client.get(f"/api/tasks/{task['id']}").json()["priority"] != 99
+    assert (
+        client.post(f"/api/tasks/{task['id']}/termination-preview", json={}, headers=headers).status_code
+        == 403
+    )

@@ -38,7 +38,7 @@ function mockServer() {
     else if (path === "/api/system-users" && options?.method === "GET")
       data = [account];
     else if (path === "/api/system-groups")
-      data = [{ id: "research", name: "research", protected: false }];
+      data = [{ id: "research", name: "research", protected: false, assignable: true }];
     else if (path.endsWith("/change-preview"))
       data = {
         token: "rename-scope",
@@ -182,7 +182,7 @@ test("account creation supports SSH public key without requiring an initial pass
   expect(body.public_keys).toHaveLength(1);
   expect(body.password).toBeUndefined();
   expect(body.require_password_change).toBe(true);
-  expect(body.groups).toEqual(["human"]);
+  expect(body.groups).toEqual([]);
 }, 10000);
 
 test("storage cold cache shows collecting state", async () => {
@@ -230,6 +230,7 @@ test("other business users cannot edit policy", async () => {
 test("human system group is readonly even without a protected flag", async () => {
   vi.stubGlobal("fetch",vi.fn(async()=>new Response(JSON.stringify([{id:"human",name:"human",managed:true,protected:false,members:[]}]))));
   renderPage(<SystemGroups />);
-  expect(await screen.findByRole("button",{name:/编\s*辑/})).toBeDisabled();
-  expect(screen.getByRole("button",{name:"删除空组"})).toBeDisabled();
+  await screen.findByText("human", {exact:true});
+  expect(screen.queryByRole("button",{name:/编\s*辑/})).not.toBeInTheDocument();
+  expect(screen.queryByRole("button",{name:"删除空组"})).not.toBeInTheDocument();
 });

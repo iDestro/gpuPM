@@ -12,8 +12,9 @@ from gpupm.domain.schemas import TaskPatch, SettingsPatch
 from gpupm.domain.rules import account_status, parse_time, utcnow, validate_name
 from gpupm.domain.settings import DEFAULT_SETTINGS, task_defaults, ignored_process
 from gpupm.errors import DomainError
+from gpupm.agent.groups import describe_group, filter_groups, require_assignable, validate_group_change
 
-SENSITIVE_GROUPS = {"root", "sudo", "docker", "adm", "gpupm", "shadow", "disk", "lxd", "libvirt"}
+from gpupm.agent.accounts import SENSITIVE_GROUPS
 
 
 def require_groups(groups):
@@ -80,6 +81,8 @@ class DemoAgent:
                     gid=1001 + index,
                     groups=[name, "human"],
                     primary_group=name,
+                    private_group=name,
+                    private_gid=1001 + index,
                     shell="/bin/bash",
                     home=f"/home/{name}",
                     data_dir=f"/data/{name}",
@@ -163,7 +166,7 @@ class DemoAgent:
                     id=a["username"],
                     name=a["username"],
                     gid=a["gid"],
-                    members=[a["username"]],
+                    members=[],
                     managed=True,
                     protected=False,
                     revision=1,
@@ -205,6 +208,11 @@ class DemoAgent:
         )
         if changes and "password" in changes:
             raise DomainError("secret_in_preview", "密码不能进入预览", 422)
+        if kind == "group":
+            result["host_scope"] = {
+                k: copy.deepcopy(item.get(k))
+                for k in ("gid", "name", "members", "managed", "kind", "primary_users", "share_refs")
+            }
         state["previews"][token] = dict(**result, kind=kind, action=action, changes=changes or {})
         return result
 
@@ -222,6 +230,10 @@ class DemoAgent:
             raise DomainError("scope_changed", "预览过期或范围/配置已经改变，请重新预览")
         if params.get("revision", item["revision"]) != item["revision"]:
             raise DomainError("revision_conflict", "配置版本已经改变")
+        if preview.get("host_scope") != (
+            {k: item.get(k) for k in preview["host_scope"]} if preview.get("host_scope") else None
+        ):
+            raise DomainError("scope_changed", "group native scope changed")
         return preview
 
     def event(self, state, params, action, target, before, after):
@@ -243,6 +255,13 @@ class DemoAgent:
         if not item.get("is_human"):
             raise DomainError("non_human_readonly", "only human accounts and tasks are editable", 403)
 
+    def sync_account_groups(self, state, account):
+        for group in state["system_groups"]:
+            members = set(group["members"]) - {account["username"]}
+            if group["name"] in account["groups"] and group["gid"] != account["gid"]:
+                members.add(account["username"])
+            group["members"] = sorted(members)
+
     def validate_group_scope(self, state, names):
         for name in names:
             if name == "human":
@@ -261,9 +280,33 @@ class DemoAgent:
     def dispatch(self, state, method, p):
         human = next((g for g in state["system_groups"] if g["name"] == "human"), None)
         for account in state["accounts"]:
+            private = next(
+                (
+                    g
+                    for g in state["system_groups"]
+                    if g["name"] == account["username"] and g["gid"] == account["gid"]
+                ),
+                None,
+            )
+            if private and account.get("private_group", private["name"]) == private["name"]:
+                account.setdefault("private_group", private["name"])
+                account.setdefault("private_gid", private["gid"])
             account["is_human"] = bool(
                 human and (account["gid"] == human["gid"] or account["username"] in human["members"])
             )
+        state["system_groups"] = [
+            describe_group(
+                g,
+                state["accounts"],
+                state["shares"],
+                {
+                    a.get("private_group", a.get("primary_group"))
+                    for a in state["accounts"]
+                    if a.get("primary_group") == a["username"] or a.get("private_group")
+                },
+            )
+            for g in state["system_groups"]
+        ]
         humans = {a["uid"] for a in state["accounts"] if a["is_human"]}
         for task in state["tasks"]:
             members = task["members"] + task.get("ignored_members", [])
@@ -288,16 +331,30 @@ class DemoAgent:
             if p.get("id") == "human" or changes.get("name") == "human":
                 raise DomainError("protected_group", "human membership is root-controlled", 403)
             if p.get("action") != "create":
+                group = self.find(state, "system_groups", p["id"])
+                validate_group_change(group, p.get("action", "update"), changes)
                 self.validate_group_scope(state, [p["id"]])
+            elif "managed" in changes:
+                raise DomainError("invalid_adoption", "create cannot adopt", 422)
+            if "members" in changes and not isinstance(changes["members"], list):
+                raise DomainError("invalid_members", "members must be a list", 422)
             for member in changes.get("members", []):
                 account = next((a for a in state["accounts"] if a["username"] == member), None)
                 if not account:
                     raise DomainError("non_human_readonly", "unknown group member", 403)
                 self.require_human(account)
+                if account["protected"] or not account["managed"]:
+                    raise DomainError("protected_account", "grant only to managed ordinary accounts", 403)
         if method in {"preview_share_change", "execute_share_change"}:
             share = self.find(state, "shares", p["id"]) if p.get("id") else {}
             fields = dict(share, **p.get("changes", {}))
-            self.validate_group_scope(state, [fields["reader_group"], fields["writer_group"]])
+            names = [
+                fields[f] for f in ("reader_group", "writer_group") if not share or fields[f] != share[f]
+            ]
+            if names:
+                names = [fields["reader_group"], fields["writer_group"]]
+                require_assignable(state["system_groups"], names)
+                self.validate_group_scope(state, names)
         for account in state["accounts"]:
             expired = bool(account.get("expires_on") and account["expires_on"] <= utcnow().date().isoformat())
             account["status"] = account_status(
@@ -341,7 +398,7 @@ class DemoAgent:
         if method == "list_accounts":
             return state["accounts"]
         if method == "list_system_groups":
-            return state["system_groups"]
+            return filter_groups(state["system_groups"], p.get("scope", "managed"))
         if method == "list_shares":
             return state["shares"]
         if method == "apply_task_policy":
@@ -480,6 +537,8 @@ class DemoAgent:
             return task
         if method == "preview_account_change":
             account = self.find(state, "accounts", p["id"])
+            if not account["managed"] and p.get("changes", {}).get("managed") is not True:
+                raise DomainError("account_unmanaged", "explicit account adoption required", 403)
             self.require_human(account)
             if account["protected"]:
                 raise DomainError("protected_account", "账号受保护", 403)
@@ -488,11 +547,50 @@ class DemoAgent:
             return self.preview(state, "account", account, p["action"], changes=p.get("changes", {}))
         if method == "execute_account_change":
             changes = dict(p.get("changes", {}))
-            require_groups(changes.get("groups", []))
+            if "managed" in changes and changes["managed"] is not True:
+                raise DomainError("invalid_adoption", "managed account cannot be released", 422)
+            current = self.find(state, "accounts", p["id"]) if p["action"] != "create" else {}
+            if current and not current["managed"] and changes.get("managed") is not True:
+                raise DomainError("account_unmanaged", "explicit account adoption required", 403)
+            require_assignable(
+                state["system_groups"],
+                [g for g in changes.get("groups", []) if g not in current.get("groups", []) and g != "human"],
+            )
             if "primary_group" in changes:
-                require_groups([changes["primary_group"]])
+                if p["action"] == "create":
+                    raise DomainError("private_primary_group", "new accounts receive private groups", 422)
+                if changes["primary_group"] != current.get("primary_group"):
+                    target = next(
+                        (g for g in state["system_groups"] if g["name"] == changes["primary_group"]), None
+                    )
+                    own_private = (
+                        changes["primary_group"] == current.get("private_group")
+                        and current.get("private_gid") is not None
+                    )
+                    if own_private and (not target or target["gid"] != current["private_gid"]):
+                        raise DomainError("identity_conflict", "private group GID changed", 403)
+                    if own_private:
+                        require_groups([target["name"]])
+                        if target["gid"] < 1000:
+                            raise DomainError("protected_group", "system group grant forbidden", 403)
+                        self.validate_group_scope(state, [target["name"]])
+                        members = set(target["members"]) | set(target["primary_users"])
+                        if any(
+                            a["username"] in members and (a["protected"] or not a["managed"])
+                            for a in state["accounts"]
+                        ):
+                            raise DomainError(
+                                "protected_account", "private primary group contains readonly accounts", 403
+                            )
+                    if not own_private:
+                        require_assignable(state["system_groups"], [changes["primary_group"]])
                 if not any(g["name"] == changes["primary_group"] for g in state["system_groups"]):
                     raise DomainError("not_found", "主组不存在", 404)
+                if changes["primary_group"] == current.get("primary_group") and not any(
+                    g["name"] == changes["primary_group"] and g["gid"] == current["gid"]
+                    for g in state["system_groups"]
+                ):
+                    raise DomainError("identity_conflict", "current primary group GID changed", 403)
             action = p["action"]
             if action == "create":
                 name = validate_name(changes["username"])
@@ -511,6 +609,8 @@ class DemoAgent:
                     groups=sorted({name, "human", *changes.get("groups", [])}),
                     is_human=True,
                     primary_group=name,
+                    private_group=name,
+                    private_gid=uid,
                     shell="/bin/bash",
                     home=f"/home/{name}",
                     data_dir=f"/data/{name}",
@@ -533,6 +633,7 @@ class DemoAgent:
                         id=name, name=name, gid=uid, members=[name], protected=False, managed=True, revision=1
                     )
                 )
+                self.sync_account_groups(state, account)
                 self.event(state, p, "account.create", account["id"], None, account)
                 return account
             account = self.find(state, "accounts", p["id"])
@@ -552,6 +653,9 @@ class DemoAgent:
             if account.get("deleted_at") and action not in {"restore"}:
                 raise DomainError("account_deleted", "先恢复已删除账号")
             before = copy.deepcopy(account)
+            if account["primary_group"] == account["username"]:
+                account["private_group"] = account["primary_group"]
+                account["private_gid"] = account["gid"]
             if action == "disable":
                 account["disabled"] = True
             elif action == "enable":
@@ -574,6 +678,7 @@ class DemoAgent:
                     account.update(home=f"/home/{name}", data_dir=f"/data/{name}")
                 for field in [
                     "username",
+                    "managed",
                     "notes",
                     "shell",
                     "groups",
@@ -584,6 +689,18 @@ class DemoAgent:
                 ]:
                     if field in changes:
                         account[field] = changes[field]
+                        if field == "groups":
+                            account[field] = sorted(
+                                set(account[field])
+                                | {
+                                    g
+                                    for g in before.get("groups", [])
+                                    if not any(
+                                        item["name"] == g and item["assignable"]
+                                        for item in state["system_groups"]
+                                    )
+                                }
+                            )
             else:
                 raise DomainError("unsupported", "不支持的账号操作", 422)
             if "groups" in changes or "primary_group" in changes:
@@ -591,6 +708,12 @@ class DemoAgent:
                 if account["username"] not in human["members"]:
                     human["members"].append(account["username"])
             if "primary_group" in changes:
+                old_primary = before["primary_group"]
+                old_group = next((g for g in state["system_groups"] if g["name"] == old_primary), None)
+                memberships = set(account["groups"])
+                if "groups" not in changes and old_group and before["username"] not in old_group["members"]:
+                    memberships.discard(old_primary)
+                account["groups"] = sorted(memberships | {changes["primary_group"]})
                 account["gid"] = next(
                     g["gid"] for g in state["system_groups"] if g["name"] == changes["primary_group"]
                 )
@@ -598,6 +721,8 @@ class DemoAgent:
             account["status"] = account_status(
                 deleted=bool(account["deleted_at"]), disabled=account["disabled"], expired=expired
             )
+            if "groups" in changes:
+                self.sync_account_groups(state, account)
             account["revision"] += 1
             self.event(state, p, "account." + action, account["id"], before, account)
             return account
@@ -641,11 +766,28 @@ class DemoAgent:
                         raise DomainError("group_in_use", "系统组有成员或主组引用")
                     state["system_groups"].remove(group)
                 else:
+                    if "name" in changes and changes["name"] != group["name"]:
+                        if any(g["name"] == changes["name"] for g in state["system_groups"]):
+                            raise DomainError("group_exists", "system group exists")
+                        for account in state["accounts"]:
+                            if account["gid"] == group["gid"]:
+                                account["primary_group"] = changes["name"]
+                            account["groups"] = [
+                                changes["name"] if name == group["name"] else name
+                                for name in account["groups"]
+                            ]
+                        group["id"] = changes["name"]
                     group.update(changes)
                     group["revision"] += 1
                 del state["previews"][p["token"]]
+            if "members" in changes:
+                for account in state["accounts"]:
+                    memberships = set(account["groups"]) - {group["name"]}
+                    if account["username"] in group["members"] or account["gid"] == group["gid"]:
+                        memberships.add(group["name"])
+                    account["groups"] = sorted(memberships)
             self.event(state, p, "system_group." + p["action"], group["id"], None, group)
-            return group
+            return describe_group(group, state["accounts"], state["shares"])
         if method == "storage_snapshot":
             return dict(
                 filesystems=[
@@ -750,7 +892,8 @@ class DemoAgent:
                     raise DomainError("share_exists", "共享项目已存在")
             if preview["changes"] != changes:
                 raise DomainError("scope_changed", "共享授权与预览不同")
-            require_groups([fields["reader_group"], fields["writer_group"]])
+            if not p.get("id"):
+                require_groups([fields["reader_group"], fields["writer_group"]])
             known = {g["name"] for g in state["system_groups"]}
             if fields["reader_group"] not in known or fields["writer_group"] not in known:
                 raise DomainError("group_missing", "共享授权组不存在", 422)

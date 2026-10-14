@@ -327,6 +327,9 @@ class AgentService:
                     "members",
                     "managed",
                     "protected",
+                    "kind",
+                    "primary_users",
+                    "share_refs",
                 )
             }
         state["previews"][token] = value
@@ -509,7 +512,9 @@ class AgentService:
         if method == "list_accounts":
             return self.accounts.list(state)
         if method == "list_system_groups":
-            return self.accounts.groups(state)
+            from gpupm.agent.groups import filter_groups
+
+            return filter_groups(self.accounts.groups(state), p.get("scope", "managed"))
         if method == "account_activity":
             return self.accounts.activity(state, p["id"])
         if method == "apply_task_policy":
@@ -772,9 +777,13 @@ class AgentService:
 
         action = p.get("action", "update")
         changes = p.get("changes", {})
-        if set(changes) - {"name", "members"}:
+        from gpupm.agent.groups import validate_group_change
+
+        if set(changes) - {"name", "members", "managed"}:
             raise DomainError("invalid_fields", "only group name and members editable", 422)
         if action == "create":
+            if "managed" in changes:
+                raise DomainError("invalid_adoption", "create cannot adopt", 422)
             name = validate_name(changes["name"])
             if name in SENSITIVE_GROUPS or name == "human":
                 raise DomainError("protected_group", "sensitive group forbidden", 403)
@@ -789,8 +798,7 @@ class AgentService:
             group = next((g for g in self.accounts.groups(state) if g["id"] == p["id"]), None)
             if not group:
                 raise DomainError("not_found", "system group not found", 404)
-            if group["protected"] or not group["managed"]:
-                raise DomainError("protected_group", "only managed ordinary groups editable", 403)
+            validate_group_change(group, action, changes)
             self.accounts.assert_human_group(group["name"])
             self.revision(group, p)
         if "members" in changes:
@@ -813,7 +821,9 @@ class AgentService:
         before = copy.deepcopy(group)
         if action == "create":
             self.accounts.run(["groupadd", changes["name"]])
-            state["groups"][changes["name"]] = {"revision": 1}
+            state["groups"][changes["name"]] = {"revision": 1, "gid": grp.getgrnam(changes["name"]).gr_gid}
+        elif changes.get("managed") is True:
+            state["groups"][group["name"]] = {"revision": group["revision"] + 1, "gid": group["gid"]}
         elif action == "delete":
             if group["members"] or any(
                 entry.pw_gid == group["gid"] for entry in __import__("pwd").getpwall()

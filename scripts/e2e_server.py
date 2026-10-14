@@ -38,6 +38,10 @@ with tempfile.TemporaryDirectory(prefix="gpupm-e2e-") as directory:
             orphan_reminder=True, orphan_wait_seconds=300, protected=False, revision=1,
         )
         state["tasks"].append(task)
+        state["system_groups"].append({
+            "id": "e2e-project-group", "name": "e2e-project-group", "gid": 9000,
+            "members": [], "managed": False, "protected": False, "revision": 1,
+        })
         db.execute("UPDATE state SET data=? WHERE id=1", (json.dumps(state),))
     app.state.auth.create_admin("admin", "Strong-admin-pass-42")
     uvicorn.run(app, host="127.0.0.1", port=8001, log_level="warning")

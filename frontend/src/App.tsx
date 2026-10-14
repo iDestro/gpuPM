@@ -59,7 +59,7 @@ const menu = [
   { key: "/groups", label: "业务优先级组", icon: <OrderedListOutlined /> },
   { key: "/users", label: "用户业务策略", icon: <SolutionOutlined /> },
   { key: "/accounts", label: "Linux 本地账号", icon: <UserOutlined /> },
-  { key: "/system-groups", label: "Linux 系统组", icon: <TeamOutlined /> },
+  { key: "/system-groups", label: "Linux 权限组", icon: <TeamOutlined /> },
   { key: "/storage", label: "存储与容量", icon: <HddOutlined /> },
   { key: "/shares", label: "团队共享目录", icon: <ShareAltOutlined /> },
   { key: "/login-events", label: "SSH 登录记录", icon: <HistoryOutlined /> },

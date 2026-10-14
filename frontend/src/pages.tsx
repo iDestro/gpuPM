@@ -907,7 +907,7 @@ export function Accounts() {
   const [state, setState] = useState("active");
   const [scope, setScope] = useState("human");
   const q = useData(`/system-users${params({ state, scope })}`);
-  const systemGroups = useData("/system-groups");
+  const systemGroups = useData("/system-groups?scope=all");
   const groups = useData("/groups");
   const [edit, setEdit] = useState<Row | null>(null);
   const [view, setView] = useState<Row | null>(null);
@@ -916,10 +916,17 @@ export function Accounts() {
   );
   const [pendingEdit, setPendingEdit] = useState<Row | null>(null);
   const save = useSave();
+  const assignableGroups = (systemGroups.data || []).filter((g: Row) => g.assignable === true);
+  const editableGroups = (edit?.groups || []).filter((name: string) => assignableGroups.some((g: Row) => g.name === name));
+  const readonlyGroups = (edit?.groups || []).filter((name: string) => !assignableGroups.some((g: Row) => g.name === name));
   const baseFields = [
-    ...accountFields,
+    ...accountFields.map(field => field.name === "groups" ? {
+      ...field, type: "multiple" as const,
+      options: assignableGroups.map((g: Row) => ({ label: g.name, value: g.name })),
+      help: translate("仅可选择受管普通权限组；human 仅用于人员分类，不授予项目权限。只读组由服务器保留。") + (readonlyGroups.length ? " " + translate("只读附属组：{groups}", { groups: readonlyGroups.join(", ") }) : ""),
+    } : field),
     ...(edit?.id ? [{name:"primary_group",label:translate("普通主系统组"),type:"select" as const,
-      options:systemGroups.data?.filter((g:Row)=>!g.protected).map((g:Row)=>({label:g.name,value:g.name})),
+      options:systemGroups.data?.filter((g:Row)=>g.assignable === true || g.name === edit.primary_group || (g.name === edit.private_group && g.gid === edit.private_gid && !g.identity_conflict)).map((g:Row)=>({label:g.name,value:g.name})),
       help:translate("按 Linux 原生规则修改；主目录内旧组文件可能同步改变组归属，其他路径保留原归属。")}] : []),
     {
       name: "group_id",
@@ -937,12 +944,13 @@ export function Accounts() {
         action={
           <Button
             type="primary"
+            disabled={systemGroups.isPending || !!systemGroups.error}
             onClick={() =>
               setEdit({
                 priority: 50,
                 require_password_change: true,
                 public_keys: [],
-                groups: ["human"],
+                groups: [],
               })
             }
           >
@@ -967,7 +975,7 @@ export function Accounts() {
           />
           <Tag>{translate("日期与采样时间：Asia/Shanghai")}</Tag>
         </Space>
-        <ErrorAlert error={q.error || save.error} />
+        <ErrorAlert error={q.error || systemGroups.error || save.error} />
         <Table<Row>
           size="small"
           tableLayout="fixed"
@@ -1018,7 +1026,7 @@ export function Accounts() {
                 <Space>
                   <Button
                     size="small"
-                    disabled={!r.is_human || r.protected || !r.managed || !!r.deleted_at || r.recovery_required}
+                    disabled={systemGroups.isPending || !!systemGroups.error || !r.is_human || r.protected || !r.managed || !!r.deleted_at || r.recovery_required}
                     onClick={() => setEdit(r)}
                   >
                     {translate("编辑")}
@@ -1065,7 +1073,7 @@ export function Accounts() {
       {edit ? (
         <EditDialog
           title={edit.id ? translate("编辑 {name}", { name: edit.username }) : translate("创建 Linux 账号")}
-          initial={edit}
+          initial={{ ...edit, groups: editableGroups }}
           fields={
             edit.id
               ? [{name: "username", label: translate("用户名"), required: true, help: translate("仅允许空闲账号改名：没有运行进程、登录会话或定时任务；提交前由服务器核验。")}, ...baseFields]
@@ -1195,6 +1203,7 @@ export function AccountDetail({
     >
       <ErrorAlert error={detail.error} />
       <RecordDetail row={account} />
+      <Alert type="info" showIcon message={translate("私有主组：{name} · GID {gid}", { name: account.private_group || "—", gid: account.private_gid ?? "—" })} description={translate("私有主组只读，随账号生命周期保留；修改主组后原私有组仍保留。human 仅用于人员分类，不授予项目权限。")} />
       {account.recovery_required ? <Alert type="error" showIcon message={translate("账号变更尚未完成，请由服务器管理员核对目录和登录状态后恢复管理。")} /> : null}
       {account.status !== "active" && ((activity.data?.processes?.length || 0) + (activity.data?.sessions?.length || 0) + (activity.data?.scheduled?.length || 0) > 0) ? <Alert type="warning" showIcon message={translate("账号已限制新登录，但仍有活动；现有进程、会话和定时任务不会自动结束。")} /> : null}
       <Space wrap className="filters">
@@ -1332,80 +1341,99 @@ export function AccountDetail({
 }
 export function SystemGroups() {
   useI18n();
-  const q = useData("/system-groups");
+  const [scope, setScope] = useState("managed");
+  const [search, setSearch] = useState("");
+  const q = useData(`/system-groups?scope=${scope}`);
+  const users = useData("/system-users?state=active&scope=human");
   const [edit, setEdit] = useState<Row | null>(null);
   const [action, setAction] = useState<Row | null>(null);
   const save = useSave();
   const fields: Field[] = [
-    { name: "name", label: translate("系统组名"), required: true },
+    { name: "name", label: translate("权限组名"), required: true },
     {
       name: "members",
-      label: translate("附属组成员（用户名，回车添加）"),
-      type: "tags",
-      help: translate("不改变用户主组；sudo/docker 等敏感组禁止授权。"),
+      label: translate("附属组成员"),
+      type: "multiple",
+      options: [...new Set([...(users.data || []).filter((u: Row) => u.managed && u.is_human && !u.protected && u.status === "active").map((u: Row) => u.username), ...(edit?.members || [])])].map(name => ({ label: String(name), value: name })),
+      disabled: users.isPending || !!users.error,
+      help: translate("仅可添加正常受管人员账号；保留已有成员。不改变用户主组，权限变更后需要重新登录。"),
     },
   ];
   return (
     <>
       <PageHead
-        title={translate("Linux 系统用户组")}
-        description={translate("系统组决定文件访问权限，与业务优先级独立。移除成员不会撤销旧进程组身份或已打开的文件句柄，用户需要重新登录。")}
+        title={translate("Linux 权限组")}
+        description={translate("受管普通权限组用于文件与项目授权。human 仅用于人员分类，不授予项目权限；私有主组在账号详情中只读展示并随账号生命周期保留。移除成员后需要重新登录。")}
         action={
           <Button type="primary" onClick={() => setEdit({ members: [] })}>
-            {translate("创建普通系统组")}
+            {translate("创建普通权限组")}
           </Button>
         }
       />
-      <ErrorAlert error={q.error || save.error} />
+      <ErrorAlert error={q.error || users.error || save.error} />
+      <Alert type="info" showIcon message={translate(scope === "managed" ? "可创建普通权限组，或在其他组中启用已有普通组的管理。" : "启用管理仅登记普通权限组，不自动修改原生成员或权限。受管但只读的组需先在账号页面启用相关人员账号管理。")} />
       <Card>
+        <Space wrap className="filters">
+          <Select aria-label={translate("权限组范围")} value={scope} onChange={setScope} options={[{label:translate("受管权限组"),value:"managed"},{label:translate("其他组（只读）"),value:"other"}]} />
+          <Input aria-label={translate("搜索权限组")} placeholder={translate("搜索权限组")} value={search} onChange={event => setSearch(event.target.value)} allowClear />
+        </Space>
         <Table<Row>
-          scroll={{ x: 1100 }}
+          scroll={{ x: 1290 }}
           size="small"
           tableLayout="fixed"
           rowKey="id"
           loading={q.isPending}
-          dataSource={q.data || []}
+          dataSource={(q.data || []).filter((r: Row) => r.name.toLowerCase().includes(search.toLowerCase()))}
           columns={[
             { title: translate("组名"), dataIndex: "name", width: 150, render: (v) => <CompactText value={v} /> },
-            { title: "GID", dataIndex: "gid", width: 140 },
+            { title: "GID", dataIndex: "gid", width: 100 },
+            { title: translate("类型"), width: 150, render: (_, r) => <Tag><TermLabel label={({permission:"普通权限组",private:"私有主组",system:"系统组",platform:"人员分类组"} as Record<string,string>)[r.kind] || "系统组"} /></Tag> },
             {
               title: translate("附属组成员"),
               width: 240,
               dataIndex: "members",
               render: (v) => <CompactText value={v?.join(", ")} />,
             },
+            { title: translate("主组账号"), width: 160, render: (_, r) => <CompactText value={r.primary_users?.join(", ")} /> },
+            { title: translate("共享项目引用"), width: 160, render: (_, r) => <CompactText value={r.share_refs?.join(", ")} /> },
             {
               title: translate("管理状态"),
               width: 140,
               render: (_, r) => (
-                <Space>
+                <Space wrap>
                   {r.protected ? <Tag>{translate("保护")}</Tag> : null}
-                  <Tag>{r.managed ? translate("受管") : translate("只读")}</Tag>
+                  {r.managed ? <Tag>{translate("受管")}</Tag> : null}
+                  {r.assignable !== true ? <Tag>{translate("只读")}</Tag> : null}
                 </Space>
               ),
             },
             {
               title: translate("操作"),
               width: 190,
-              render: (_, r) => (
+              fixed: "right",
+              render: (_, r) => r.assignable !== true ? (
+                r.can_adopt ? <Button size="small" onClick={() => setAction({ ...r, action: "update", changes: { managed: true } })}>{translate("启用管理")}</Button> : <Typography.Text type="secondary">{translate("只读")}</Typography.Text>
+              ) : (
                 <Space>
                   <Button
                     size="small"
-                    disabled={r.name === "human" || r.protected || !r.managed || r.recovery_required}
+                    disabled={r.assignable !== true || r.recovery_required}
                     onClick={() => setEdit(r)}
                   >
                     {translate("编辑")}
                   </Button>
+                  <Tooltip title={r.members?.length || r.primary_users?.length || r.share_refs?.length ? translate("仍有成员、主组账号或共享项目引用，无法删除。") : r.assignable !== true ? translate("只读组不可删除。") : undefined}>
                   <Button
                     size="small"
                     danger
-                    disabled={r.name === "human" || r.protected || !r.managed || !!r.members?.length}
+                    disabled={r.assignable !== true || r.recovery_required || !!r.members?.length || !!r.primary_users?.length || !!r.share_refs?.length}
                     onClick={() =>
                       setAction({ ...r, action: "delete", changes: {} })
                     }
                   >
                     {translate("删除空组")}
                   </Button>
+                  </Tooltip>
                 </Space>
               ),
             },
@@ -1414,12 +1442,12 @@ export function SystemGroups() {
       </Card>
       {edit ? (
         <EditDialog
-          title={edit.id ? translate("修改系统组") : translate("创建普通系统组")}
+          title={edit.id ? translate("修改权限组") : translate("创建普通权限组")}
           initial={edit}
           fields={fields}
           onClose={() => setEdit(null)}
           onSave={async (v) => {
-            if (edit.id) setAction({ ...edit, action: "update", changes: v });
+            if (edit.id) setAction({ ...edit, action: "update", changes: { name: v.name, members: v.members } });
             else
               await save.mutateAsync({
                 path: "/system-groups",
@@ -1431,7 +1459,7 @@ export function SystemGroups() {
       ) : null}
       {action ? (
         <PreviewDialog
-          title={translate("系统组变更预览")}
+          title={translate(action.changes.managed ? "启用权限组管理" : "权限组变更预览")}
           previewPath={`/system-groups/${action.id}/change-preview`}
           previewBody={{
             action: action.action,
@@ -1538,8 +1566,9 @@ export function Shares() {
   const [action, setAction] = useState<Row | null>(null);
   const save = useSave();
   const options = groups.data
-    ?.filter((g: Row) => !g.protected)
+    ?.filter((g: Row) => g.assignable === true)
     .map((g: Row) => ({ label: g.name, value: g.name }));
+  const bindingOptions = (name: string) => [...(options || []), ...(edit?.[name] && !options?.some((option: {value:string}) => option.value === edit[name]) ? [{ label: edit[name], value: edit[name], disabled: true }] : [])];
   return (
     <>
       <PageHead
@@ -1556,7 +1585,7 @@ export function Shares() {
         showIcon
         message={translate("授权撤销后，已有会话可能保留组权限和打开的文件句柄；请通知用户重新登录。不会自动终止会话或默认递归修改已有文件。")}
       />
-      <ErrorAlert error={q.error || save.error} />
+      <ErrorAlert error={q.error || groups.error || save.error} />
       <Card className="section-card">
         <Table<Row>
           scroll={{ x: 1100 }}
@@ -1599,18 +1628,27 @@ export function Shares() {
               name: "reader_group",
               label: translate("只读系统组"),
               type: "select",
-              options,
+              options: bindingOptions("reader_group"),
+              required: true,
+              disabled: groups.isPending || !!groups.error,
+              help: translate("更改授权时，最终两组都须为受管普通权限组；仅修改备注可保留原授权。"),
             },
             {
               name: "writer_group",
               label: translate("读写系统组"),
               type: "select",
-              options,
+              options: bindingOptions("writer_group"),
+              required: true,
+              disabled: groups.isPending || !!groups.error,
             },
             notes,
           ]}
           onClose={() => setEdit(null)}
           onSave={async (v) => {
+            const bindingChanged = v.reader_group !== edit.reader_group || v.writer_group !== edit.writer_group;
+            if (bindingChanged && ![v.reader_group, v.writer_group].every(name => options?.some((option: {value:string}) => option.value === name))) {
+              throw new Error(translate("更改授权时，只读组和读写组都必须选择受管普通权限组。"));
+            }
             setAction({ ...edit, changes: v });
           }}
         />

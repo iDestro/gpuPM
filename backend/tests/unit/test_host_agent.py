@@ -274,6 +274,7 @@ def test_softdelete_retains_identity_and_files_and_other_restrictions():
         uid=1000,
         gid=1000,
         username="alice",
+        primary_group="alice",
         home="/home/alice",
         data_dir="/data/alice",
         managed=True,
@@ -679,6 +680,7 @@ def test_primary_group_change_uses_validated_native_gid_without_directory_migrat
         uid=1000,
         gid=1000,
         username="alice",
+        primary_group="alice",
         home="/home/alice",
         data_dir="/data/alice",
         managed=True,
@@ -696,6 +698,8 @@ def test_primary_group_change_uses_validated_native_gid_without_directory_migrat
     accounts.is_human = lambda uid: uid == 1000
     accounts.find = lambda state, ident: dict(account, revision=meta["revision"])
     accounts.shadow_baseline = lambda name: dict(meta["baseline"])
+    accounts.groups = lambda state: [dict(name="research", assignable=True)]
+    accounts.assert_human_group = lambda name: None
     monkeypatch.setattr(module.grp, "getgrnam", lambda name: types.SimpleNamespace(gr_gid=2000, gr_name=name))
     accounts.execute({"accounts": {"1000": meta}}, "update", "1000", {"primary_group": "research"})
     assert calls == [

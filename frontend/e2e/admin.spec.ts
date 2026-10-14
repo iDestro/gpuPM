@@ -5,7 +5,7 @@ test('administrator can navigate every live API screen without errors',async({pa
   page.on('pageerror',e=>errors.push(e.message));
   await login(page);
   const pages=[['/tasks','GPU 任务'],['/groups','业务优先级组'],['/users','用户业务策略'],['/accounts','Linux 本地账号'],
-    ['/system-groups','Linux 系统组'],['/storage','存储与容量'],['/shares','团队共享目录'],['/login-events','SSH 登录记录'],['/settings','策略配置'],['/audit','操作审计']];
+    ['/system-groups','Linux 权限组'],['/storage','存储与容量'],['/shares','团队共享目录'],['/login-events','SSH 登录记录'],['/settings','策略配置'],['/audit','操作审计']];
   for(const [path,title] of pages){
     await page.goto(path);
     await expect(page.getByText(title,{exact:true}).last()).toBeVisible();

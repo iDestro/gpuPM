@@ -1,4 +1,11 @@
 const terms: Record<string,string> = {
+  'Linux 权限组':'Linux permission groups',
+  '普通权限组':'Managed regular Linux group for file and project access',
+  '私有主组':'Account-bound private primary group; retained throughout account lifecycle',
+  '人员分类组':'Personnel classification only; grants no project access',
+  '主组账号':'Accounts using this group as their primary group',
+  '共享项目引用':'Shared projects referencing this group',
+
   '忽略程序路径':'Exact executable-path allowlist',
   '残留提醒':'Residual process reminder',
   '残留等待时间':'Residual waiting duration',

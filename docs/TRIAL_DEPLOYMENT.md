@@ -118,3 +118,13 @@ Ubuntu228项后端、70项前端、14条Chrome E2E及构建/类型检查通过�
 两入口已发布JS index-BCDfTyLE.js，CSS index-U2CkS405.css保持。更新6处图标，全部11项唯一：业务优先级排序、用户策略人物文档、存储硬盘、团队共享连接、SSH历史时钟、审计文档检索；其余5项保留。桌面展开/折叠和手机抽屉同步，原名称、路由、状态记忆及中英提示保持。
 
 构建/类型检查与16条Chrome E2E通过，两入口实机菜单图标唯一性及桌面/短屏/手机显示核验通过。只更新静态包，无服务重启或任务/策略/账号数据修改。
+
+## Linux 权限组管理
+
+两入口已更新后端和静态包：JS index-DKygmK-L.js，CSS index-U2CkS405.css。侧栏及页面统一为 Linux 权限组，默认显示受管普通项目权限组；其他组只读查询，符合条件的已有普通组可经预览启用管理。账号私有主组在详情展示，human 保留只读人员分类用途。账号/共享目录授权只允许新选受管权限组；主组、成员及共享引用阻止删除。
+
+一致 SQLite 备份：/var/lib/gpupm-trial/backup-permission-groups-1791990675779365912。三个服务 active，allow_mutations=false 保持。真实 109 个组按 3 个受管权限组和 106 个其他组展示；其中 15 个私有组保持只读。演示账号旧数据按实际同名/GID 补充私有主组字段，其余策略和成员保持。
+
+Ubuntu 269 项后端通过；前端全量 77 项及补充后的 8 项权限组专项、17 条 Chrome 全流程、增强的权限组编辑及操作列可视回归、构建和 Ruff 通过。两入口实机中英文、搜索、默认/其他视图和 375px 检查通过，写请求为 0、全局设置未变；真实 passwd/group 文件校验值与升级前相同。账号密码及端口保持原设置。
+
+本机截图：.runtime/preview/permission-groups-managed-18000.png、permission-groups-other-18000.png、permission-groups-en-18000.png、permission-groups-mobile-18000.png；演示环境对应端口 18001。截图及检查脚本不入版本库。

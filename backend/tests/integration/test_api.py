@@ -303,7 +303,8 @@ def test_key_only_account_creation_and_primary_group(client):
     )
     assert created.status_code == 200, created.text
     account = created.json()
-    changes = {"primary_group": "bob"}
+    assert client.post("/api/system-groups", json={"name": "research"}, headers=headers).status_code == 200
+    changes = {"primary_group": "research"}
     preview = client.post(
         f"/api/system-users/{account['id']}/change-preview",
         json={"action": "update", "revision": account["revision"], "changes": changes},
@@ -316,7 +317,7 @@ def test_key_only_account_creation_and_primary_group(client):
         headers=headers,
     )
     assert changed.status_code == 200, changed.text
-    assert changed.json()["primary_group"] == "bob"
+    assert changed.json()["primary_group"] == "research"
     empty = client.post("/api/system-users", json={"username": "dave"}, headers=headers)
     assert empty.status_code == 422
 

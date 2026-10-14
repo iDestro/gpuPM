@@ -7,7 +7,7 @@ import stat
 import shutil
 from pathlib import Path
 
-from gpupm.agent.accounts import open_directory, secure_directory, validate_groups
+from gpupm.agent.accounts import open_directory, secure_directory
 from gpupm.domain.rules import utcnow, validate_name
 from gpupm.errors import DomainError
 
@@ -510,11 +510,15 @@ class Storage:
             merged = dict(existing or {})
             merged.update(changes)
             name = validate_name(merged["name"])
-            if "human" in {merged["reader_group"], merged["writer_group"]}:
-                raise DomainError("protected_group", "human is a classification group", 403)
-            validate_groups([merged["reader_group"], merged["writer_group"]])
-            for field in ("reader_group", "writer_group"):
-                service.accounts.assert_human_group(merged[field])
+            changed_groups = [
+                merged[field]
+                for field in ("reader_group", "writer_group")
+                if not existing or merged[field] != existing[field]
+            ]
+            if changed_groups:
+                service.accounts.validate_permission_groups(
+                    state, [merged["reader_group"], merged["writer_group"]]
+                )
             if merged["reader_group"] == merged["writer_group"]:
                 raise DomainError("invalid_share", "reader and writer groups must differ", 422)
             if existing and name != existing["name"]:
@@ -533,6 +537,13 @@ class Storage:
                 )
                 return result
             service.checked(state, p, "share", item, action, changes)
+            if existing and not changed_groups:
+                before = dict(existing)
+                existing.update(changes)
+                existing["revision"] += 1
+                state["previews"].pop(p["token"])
+                service.event(state, p, "share.update", existing["id"], before, existing)
+                return existing
             base = secure_directory(service.config.get("share_base", "/data/shared"))
             parent = open_directory(base)
             try:

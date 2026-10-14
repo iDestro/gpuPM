@@ -440,6 +440,10 @@ class Accounts:
                     uid=entry.pw_uid,
                     gid=entry.pw_gid,
                     primary_group=primary_group,
+                    private_group=meta.get("private_group")
+                    or (primary_group if primary_group == entry.pw_name else None),
+                    private_gid=meta.get("private_gid")
+                    or (entry.pw_gid if primary_group == entry.pw_name else None),
                     last_success_login={key: last_success.get(key) for key in ("time", "ip", "method")}
                     if last_success
                     else None,
@@ -469,20 +473,60 @@ class Accounts:
         return result
 
     def groups(self, state):
+        from gpupm.agent.groups import describe_group
+
         local = {line.split(":")[0] for line in Path("/etc/group").read_text().splitlines() if ":" in line}
-        return [
+        self.observe_identities(state, self.local_entries())
+        entries = pwd.getpwall()
+        accounts = [
             dict(
-                id=g.gr_name,
-                name=g.gr_name,
-                gid=g.gr_gid,
-                members=sorted(g.gr_mem),
-                protected=g.gr_gid < 1000 or g.gr_name in SENSITIVE_GROUPS or g.gr_name == "human",
-                managed=g.gr_name in state["groups"],
-                revision=state["groups"].get(g.gr_name, {}).get("revision", 1),
+                username=e.pw_name,
+                gid=e.pw_gid,
+                is_human=self.is_human(e.pw_uid),
+                protected=self.protected(e),
+                managed=bool(state["accounts"].get(str(e.pw_uid), {}).get("managed"))
+                and not state["accounts"].get(str(e.pw_uid), {}).get("identity_conflict")
+                and not state["accounts"].get(str(e.pw_uid), {}).get("rename_recovery_required"),
             )
-            for g in grp.getgrall()
-            if g.gr_name in local
+            for e in entries
         ]
+        private_names = {meta.get("private_group") for meta in state["accounts"].values()}
+        result = []
+        for g in grp.getgrall():
+            if g.gr_name not in local:
+                continue
+            meta = state["groups"].get(g.gr_name, {})
+            # shortcut: legacy metadata has no prior GID, root must audit old identities before first observation.
+            if meta and "gid" not in meta:
+                meta["gid"] = g.gr_gid
+            result.append(
+                describe_group(
+                    dict(
+                        id=g.gr_name,
+                        name=g.gr_name,
+                        gid=g.gr_gid,
+                        members=sorted(g.gr_mem),
+                        protected=g.gr_gid < 1000 or g.gr_name in SENSITIVE_GROUPS or g.gr_name == "human",
+                        managed=bool(meta) and meta.get("gid") == g.gr_gid,
+                        identity_conflict=bool(meta) and meta.get("gid") != g.gr_gid,
+                        revision=meta.get("revision", 1),
+                    ),
+                    accounts,
+                    state["shares"],
+                    private_names,
+                )
+            )
+        return result
+
+    def validate_permission_groups(self, state, names):
+        from gpupm.agent.groups import require_assignable
+
+        validate_groups(names)
+        if not names:
+            return
+        require_assignable(self.groups(state), names)
+        for name in names:
+            self.assert_human_group(name)
 
     def find(self, state, ident):
         for account in self.list(state):
@@ -827,6 +871,9 @@ class Accounts:
                 )
 
     def rename(self, state, account, meta, new_name):
+        if account.get("primary_group") == account["username"]:
+            meta.setdefault("private_group", account["username"])
+            meta.setdefault("private_gid", account["gid"])
         try:
             validate_name(new_name)
         except ValueError as exc:
@@ -922,12 +969,39 @@ class Accounts:
                     "new accounts always receive a same-name private primary group",
                     422,
                 )
-            validate_groups([changes["primary_group"]])
+            current = self.find(state, ident)
+            if changes["primary_group"] != current.get("primary_group"):
+                meta = state["accounts"].get(str(ident), {})
+                own_private = (
+                    changes["primary_group"] == meta.get("private_group")
+                    and meta.get("private_gid") is not None
+                )
+                if own_private:
+                    validate_groups([changes["primary_group"]])
+                    native_group = grp.getgrnam(changes["primary_group"])
+                    if native_group.gr_gid != meta["private_gid"]:
+                        raise DomainError("identity_conflict", "private group GID changed", 403)
+                    members = set(native_group.gr_mem) | {
+                        e.pw_name for e in pwd.getpwall() if e.pw_gid == native_group.gr_gid
+                    }
+                    for member in members:
+                        try:
+                            member_uid = pwd.getpwnam(member).pw_uid
+                        except KeyError as exc:
+                            raise DomainError(
+                                "non_human_readonly", "unknown private group member", 403
+                            ) from exc
+                        self.writable(state, str(member_uid))
+                else:
+                    self.validate_permission_groups(state, [changes["primary_group"]])
         if "groups" in changes:
             groups = changes["groups"]
             if action == "create" and isinstance(groups, list):
                 groups = [name for name in groups if name != "human"]
-            validate_groups(groups)
+            current = self.find(state, ident)["groups"] if action != "create" else []
+            if not isinstance(groups, list):
+                raise DomainError("invalid_groups", "groups must be a list", 422)
+            self.validate_permission_groups(state, [g for g in groups if g not in current])
         if "public_keys" in changes:
             validate_keys(changes["public_keys"])
         if "expires_on" in changes and changes["expires_on"] is not None:
@@ -1034,7 +1108,9 @@ class Accounts:
                 login_policy_status="pending",
             )
             state["accounts"][account["id"]] = meta
-            state["groups"][name] = {"revision": 1}
+            state["groups"][name] = {"revision": 1, "gid": entry.pw_gid}
+            meta["private_group"] = name
+            meta["private_gid"] = entry.pw_gid
             self.write_files(account, changes.get("public_keys", []), initialize=True)
             if changes.get("password"):
                 self.run(["chpasswd"], input=f"{name}:{changes['password']}\n")
@@ -1049,6 +1125,9 @@ class Accounts:
             meta = state["accounts"].setdefault(
                 account["id"], dict(revision=account["revision"], disabled=False, deleted_at=None)
             )
+            if account.get("primary_group") == account["username"]:
+                meta["private_group"] = account["username"]
+                meta["private_gid"] = account["gid"]
             if not meta.get("managed"):
                 # Adoption never imports arbitrary user-chosen paths into managed filesystem operations.
                 expected_home = str(Path(self.config.get("home_base", "/home")) / account["username"])
@@ -1117,11 +1196,13 @@ class Accounts:
             self.run(["usermod", "--append", "--groups", "human", account["username"]])
             self.run(["usermod", "--gid", changes["primary_group"], account["username"]])
         if "groups" in changes:
+            assignable = {g["name"] for g in self.groups(state) if g["assignable"]}
+            preserved = set(account.get("groups", [])) - assignable
             self.run(
                 [
                     "usermod",
                     "--groups",
-                    ",".join(sorted(set(changes["groups"]) | {"human"})),
+                    ",".join(sorted(set(changes["groups"]) | {"human"} | preserved)),
                     account["username"],
                 ]
             )

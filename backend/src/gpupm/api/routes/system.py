@@ -2,7 +2,7 @@ from datetime import datetime
 from typing import Literal
 
 from fastapi import APIRouter, Query, Request
-from pydantic import Field
+from pydantic import Field, StrictBool
 
 from gpupm.api.routes.common import agent_mutation, context
 from gpupm.db.models import ManagedUser, ManagementGroup
@@ -24,6 +24,7 @@ router = APIRouter(prefix="/api")
 
 
 class SystemGroupPatch(Input):
+    managed: StrictBool | None = None
     reason: str = Field(default="系统组修改", max_length=1024)
     revision: int = Field(gt=0)
     token: str
@@ -207,8 +208,8 @@ def activity(ident: str, request: Request):
 
 
 @router.get("/system-groups")
-def system_groups(request: Request):
-    return context(request).agent.call("list_system_groups")
+def system_groups(request: Request, scope: Literal["managed", "other", "all"] = "managed"):
+    return context(request).agent.call("list_system_groups", {"scope": scope})
 
 
 @router.post("/system-groups")

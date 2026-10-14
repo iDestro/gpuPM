@@ -32,10 +32,11 @@ export type Field = {
     | "switch"
     | "select"
     | "tags"
+    | "multiple"
     | "date"
     | "datetime";
   required?: boolean;
-  options?: { label: string; value: any }[];
+  options?: { label: string; value: any; disabled?: boolean }[];
   min?: number;
   max?: number;
   help?: string;
@@ -305,10 +306,10 @@ export function EditDialog({
               />
             ) : f.type === "switch" ? (
               <Switch disabled={f.disabled} />
-            ) : f.type === "select" || f.type === "tags" ? (
+            ) : f.type === "select" || f.type === "tags" || f.type === "multiple" ? (
               <Select
                 allowClear
-                mode={f.type === "tags" ? "tags" : undefined}
+                mode={f.type === "tags" ? "tags" : f.type === "multiple" ? "multiple" : undefined}
                 options={f.options}
                 disabled={f.disabled}
               />

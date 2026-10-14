@@ -191,3 +191,38 @@ test("dirty edit cancellation offers continuing or discarding without an implici
   await waitFor(()=>expect(onClose).toHaveBeenCalledTimes(1));
   expect(onSave).not.toHaveBeenCalled();
 });
+
+function runtimeDialog(initial: number | null = null) {
+  const save = vi.fn().mockResolvedValue({});
+  render(<EditDialog title="编辑任务" fields={[{name:"max_runtime_seconds",label:"最大运行时间",type:"duration"}]} initial={{max_runtime_seconds:initial,revision:9}} onClose={()=>{}} onSave={save}/>);
+  return save;
+}
+test("runtime input preserves seconds precisely and submits mixed hours minutes seconds", async () => {
+  const save=runtimeDialog(3661);
+  expect(screen.getByRole("spinbutton",{name:"小时"})).toHaveValue("1");
+  expect(screen.getByRole("spinbutton",{name:"分钟"})).toHaveValue("1");
+  expect(screen.getByRole("spinbutton",{name:"秒"})).toHaveValue("1");
+  const seconds=screen.getByRole("spinbutton",{name:"秒"});
+  await userEvent.clear(seconds);
+  await userEvent.type(seconds,"30");
+  await userEvent.click(screen.getByRole("button",{name:/保\s*存/}));
+  await waitFor(()=>expect(save).toHaveBeenCalledWith({max_runtime_seconds:3690,revision:9}));
+});
+test.each([["30秒",30],["24小时",86400],["不限时",null]])("runtime preset %s submits seconds or null", async (name, seconds) => {
+  const save=runtimeDialog(3661);
+  await userEvent.click(screen.getByRole("button",{name:String(name)}));
+  await userEvent.click(screen.getByRole("button",{name:/保\s*存/}));
+  await waitFor(()=>expect(save).toHaveBeenCalledWith({max_runtime_seconds:seconds,revision:9}));
+});
+test("clearing all runtime parts removes the time limit", async () => {
+  const save=runtimeDialog(3661);
+  for(const name of ["小时","分钟","秒"]) await userEvent.clear(screen.getByRole("spinbutton",{name}));
+  await userEvent.click(screen.getByRole("button",{name:/保\s*存/}));
+  await waitFor(()=>expect(save).toHaveBeenCalledWith({max_runtime_seconds:null,revision:9}));
+});
+test.each([0,315360060])("invalid runtime %s prevents saving", async (initial) => {
+  const save=runtimeDialog(initial);
+  await userEvent.click(screen.getByRole("button",{name:/保\s*存/}));
+  await screen.findByText("运行时间需为1秒至87600小时；不限时请清空");
+  expect(save).not.toHaveBeenCalled();
+});

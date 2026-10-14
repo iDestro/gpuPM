@@ -24,6 +24,7 @@ export type Field = {
   label: string;
   type?:
     | "number"
+    | "duration"
     | "textarea"
     | "password"
     | "switch"
@@ -121,6 +122,43 @@ export function useSave() {
     retry: false,
   });
 }
+type RuntimeValue = { hours?: number | null; minutes?: number | null; seconds?: number | null };
+function runtimeSeconds(value: RuntimeValue = {}) {
+  return Object.values(value).every((part) => part == null)
+    ? null
+    : (value.hours ?? 0) * 3600 + (value.minutes ?? 0) * 60 + (value.seconds ?? 0);
+}
+function RuntimeInput({ value = {}, onChange, id, disabled }: {
+  value?: RuntimeValue; onChange?: (value: RuntimeValue) => void; id?: string; disabled?: boolean;
+}) {
+  const current = runtimeSeconds(value);
+  return <Space direction="vertical" style={{ width: "100%" }}>
+    <Space wrap>
+      {(["hours", "minutes", "seconds"] as const).map((unit, index) => <InputNumber
+        key={unit}
+        id={index === 0 ? id : `${id}-${unit}`}
+        aria-label={["小时", "分钟", "秒"][index]}
+        addonAfter={["时", "分", "秒"][index]}
+        min={0}
+        max={index === 0 ? 87600 : 59}
+        precision={0}
+        value={value[unit] ?? null}
+        onChange={(part) => onChange?.({ ...value, [unit]: part })}
+        disabled={disabled}
+        style={{ width: index === 0 ? 130 : 100 }}
+      />)}
+    </Space>
+    <Space wrap size={6}>
+      {([["30秒", 30], ["1分钟", 60], ["30分钟", 1800], ["1小时", 3600], ["4小时", 14400], ["24小时", 86400], ["不限时", null]] as const).map(([label, seconds]) => <Button
+        key={label}
+        size="small"
+        type={current === seconds ? "primary" : "default"}
+        disabled={disabled}
+        onClick={() => onChange?.(seconds == null ? {} : { hours: Math.floor(seconds / 3600), minutes: Math.floor(seconds % 3600 / 60), seconds: seconds % 60 })}
+      >{label}</Button>)}
+    </Space>
+  </Space>;
+}
 export function EditDialog({
   title,
   fields,
@@ -166,6 +204,7 @@ export function EditDialog({
     try {
       const payload = { ...values };
       for (const f of fields) {
+        if (f.type === "duration") payload[f.name] = runtimeSeconds(values[f.name]);
         if (f.type === "datetime")
           payload[f.name] = values[f.name]
             ? new Date(`${values[f.name]}+08:00`).toISOString()
@@ -183,13 +222,20 @@ export function EditDialog({
     }
   };
   const defaults = { ...snapshot };
-  for (const f of fields)
+  for (const f of fields) {
+    if (f.type === "duration") {
+      const seconds = defaults[f.name];
+      defaults[f.name] = seconds == null ? {} : {
+        hours: Math.floor(seconds / 3600), minutes: Math.floor(seconds % 3600 / 60), seconds: seconds % 60,
+      };
+    }
     if (f.type === "datetime" && defaults[f.name])
       defaults[f.name] = new Date(
         new Date(defaults[f.name]).getTime() + 8 * 3600000,
       )
         .toISOString()
         .slice(0, 16);
+  }
   return (
     <Modal
       open
@@ -198,6 +244,8 @@ export function EditDialog({
       footer={null}
       maskClosable={!dirty}
       width={650}
+      centered
+      styles={{ body: { maxHeight: "calc(100dvh - 160px)", overflowY: "auto" } }}
       destroyOnHidden
     >
       {contextHolder}
@@ -214,15 +262,23 @@ export function EditDialog({
             key={f.name}
             name={f.name}
             label={f.label}
-            help={f.help}
+            extra={f.help}
             valuePropName={f.type === "switch" ? "checked" : "value"}
-            rules={
-              f.required
-                ? [{ required: true, message: `请填写${f.label}` }]
-                : []
-            }
+            rules={[
+              ...(f.required ? [{ required: true, message: `请填写${f.label}` }] : []),
+              ...(f.type === "duration" ? [{ validator: async (_: unknown, value: RuntimeValue = {}) => {
+                const seconds = runtimeSeconds(value);
+                if (Object.values(value).some((part) => part != null && (!Number.isInteger(part) || part < 0)) ||
+                    (value.minutes ?? 0) > 59 || (value.seconds ?? 0) > 59 ||
+                    (seconds != null && (seconds < 1 || seconds > 315360000))) {
+                  throw new Error("运行时间需为1秒至87600小时；不限时请清空");
+                }
+              } }] : []),
+            ]}
           >
-            {f.type === "number" ? (
+            {f.type === "duration" ? (
+              <RuntimeInput disabled={f.disabled} />
+            ) : f.type === "number" ? (
               <InputNumber
                 min={f.min}
                 max={f.max}

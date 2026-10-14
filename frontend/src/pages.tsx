@@ -57,9 +57,9 @@ const taskFields: Field[] = [
   },
   {
     name: "max_runtime_seconds",
-    label: "最大运行秒数（留空不限时）",
-    type: "number",
-    min: 1,
+    label: "最大运行时间",
+    type: "duration",
+    help: "从任务启动时刻计算；留空或点击“不限时”可取消时限",
   },
   {
     name: "expires_at",
@@ -1620,13 +1620,13 @@ export function Settings() {
         {
           scan_interval_seconds: "GPU 扫描周期 (秒)",
           term_grace_seconds: "SIGTERM 退出等待 (秒)",
-          default_max_runtime_seconds: "默认最大运行时长 (秒，留空不限)",
+          default_max_runtime_seconds: "默认最大运行时间",
           storage_scan_interval_seconds: "存储扫描周期 (秒)",
           warning_percent: "容量提醒阈值 (%)",
           critical_percent: "容量严重阈值 (%)",
         } as Row
       )[name],
-      type: "number" as const,
+      type: name === "default_max_runtime_seconds" ? "duration" as const : "number" as const,
       min: 1,
       max: name.endsWith("percent") ? 100 : undefined,
     })),

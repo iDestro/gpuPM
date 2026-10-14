@@ -72,4 +72,6 @@ SQLite 备份回归验证提交的 WAL 数据被包含、未提交数据不被�
 
 服务器以只读方式核对原 QA agent 实例中的12个创建账号：managed=true、human成员、同名私人主组、主/数据目录0700且属主正确、~/data链接正确、.bashrc包含umask077。未新增/修改任何真实账号。
 
-管理标记归属于创建该账号的 agent 管理库。QA验收实例 /var/lib/gpupm-qa/state.sqlite 与试用实例 /var/lib/gpupm-trial/agent/agent.db 独立，因此历史 QA 账号在试用 Web 中不自动视为已管理；human成员身份仅划定人员范围，不会自动纳管其他实例或服务器既有账号。
+管理标记归属于创建该账号的 agent 管理库。QA验收实例 /var/lib/gpupm-qa/state.sqlite 与试用实例 /var/lib/gpupm-trial/agent/agent.db 独立，试用部署当时遗漏了已管理QA记录迁移。用户截图后已对账导入15个QA管理记录，保留原软删除/停用状态和目标生命周期ID；human成员身份仍仅划定人员范围，不会自动接管其他服务器既有账号。
+
+迁移后真实HTTP专项验收通过：15个QA账号全部已管理/已软删除；默认人员列表3人；截图2账号有效期为空，1970锁定占位日期消失。passwd/shadow和目录属性前后相同，写能力未开启。备份与详情见TRIAL_DEPLOYMENT.md“QA管理记录迁移修复”。

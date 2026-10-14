@@ -21,6 +21,10 @@ button, input, select { font: inherit; }
 .topbar-actions .ant-tag { margin: 0; font-size: 11px; }
 .header-user { max-width: 140px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .navigation-toggle { display: none; flex-shrink: 0; }
+.sidebar-toggle { flex-shrink: 0; }
+.sidebar.ant-layout-sider-collapsed .brand { justify-content: center; padding-inline: 0; }
+.sidebar.ant-layout-sider-collapsed .ant-menu-inline-collapsed { width: 100%; }
+.sidebar.ant-layout-sider-collapsed .sidebar-footer { justify-content: center; padding-inline: 8px; }
 .content-scroll { flex: 1; min-height: 0; min-width: 0; overflow-y: auto; overflow-x: hidden; overscroll-behavior: contain; scrollbar-gutter: stable; outline: none; }
 .content { width: 100%; max-width: 1600px; min-width: 0; margin: 0 auto; padding: 24px; }
 .page-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; margin-bottom: 20px; }
@@ -69,6 +73,7 @@ button, input, select { font: inherit; }
 .screen-loading { min-height: 100vh; display: flex; align-items: center; justify-content: center; }
 @media (max-width: 991px) {
   .sidebar { display: none; }
+  .sidebar-toggle { display: none; }
   .navigation-toggle { display: inline-flex; }
   .content { padding: 20px; }
   .topbar { padding: 0 20px; }

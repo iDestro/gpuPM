@@ -25,6 +25,8 @@ import {
   LoginOutlined,
   LogoutOutlined,
   MenuOutlined,
+  MenuFoldOutlined,
+  MenuUnfoldOutlined,
 } from "@ant-design/icons";
 import {
   Navigate,
@@ -71,6 +73,16 @@ export default function App() {
   const [error, setError] = useState<unknown>();
   const [logoutBusy, setLogoutBusy] = useState(false);
   const [navigationOpen, setNavigationOpen] = useState(false);
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(() => {
+    try { return localStorage.getItem("gpupm.sidebar.collapsed") === "true"; }
+    catch { return false; }
+  });
+  const toggleSidebar = () => {
+    const next = !sidebarCollapsed;
+    setSidebarCollapsed(next);
+    try { localStorage.setItem("gpupm.sidebar.collapsed", String(next)); }
+    catch { /* Keep navigation usable when browser storage is unavailable. */ }
+  };
   const contentRef = useRef<HTMLDivElement>(null);
   const navigate = useNavigate();
   const location = useLocation();
@@ -196,36 +208,37 @@ export default function App() {
   const selected = location.pathname.startsWith("/tasks/")
     ? "/tasks"
     : location.pathname;
-  const localizedMenu = menu.map(item => ({ ...item, label: t(item.label) }));
+  const localizedMenu = menu.map(item => ({ ...item, label: t(item.label), title: t(item.label), "aria-label": t(item.label) }));
   const navigationItems = [
     { type: "group" as const, label: t("资源监控"), children: localizedMenu.slice(0, 2) },
     { type: "group" as const, label: t("账号与权限"), children: [localizedMenu[4], localizedMenu[5], localizedMenu[2], localizedMenu[3]] },
     { type: "group" as const, label: t("存储协作"), children: localizedMenu.slice(6, 8) },
     { type: "group" as const, label: t("记录与设置"), children: [localizedMenu[8], localizedMenu[10], localizedMenu[9]] },
   ];
-  const navigation = <>
+  const navigation = (collapsed = false, id = "drawer-navigation") => <>
     <div className="brand">
       <span className="brand-mark">G</span>
-      <div>gpuPM<small>{t("服务器管理")}</small></div>
+      {!collapsed ? <div>gpuPM<small>{t("服务器管理")}</small></div> : null}
     </div>
-    <nav className="sidebar-menu" aria-label={t("主导航")}>
-      <Menu selectedKeys={[selected]} items={navigationItems} onClick={({ key }) => {
+    <nav id={id} className="sidebar-menu" aria-label={t("主导航")}>
+      <Menu mode="inline" inlineCollapsed={collapsed} selectedKeys={[selected]} items={collapsed ? navigationItems.flatMap(group => group.children) : navigationItems} onClick={({ key }) => {
         navigate(key);
         setNavigationOpen(false);
       }} />
     </nav>
-    <div className="sidebar-footer">{t("单机控制台")} <span>UTC+8</span></div>
+    <div className="sidebar-footer">{!collapsed ? t("单机控制台") : null}<span>UTC+8</span></div>
   </>;
   return (
     <Layout className="app-layout">
       <a href="#main-content" className="skip-link">{t("跳转到内容")}</a>
-      <Layout.Sider width={224} theme="light" className="sidebar">{navigation}</Layout.Sider>
+      <Layout.Sider width={224} collapsedWidth={64} collapsed={sidebarCollapsed} trigger={null} theme="light" className="sidebar">{navigation(sidebarCollapsed, "desktop-navigation")}</Layout.Sider>
       <Drawer title={t("导航")} open={navigationOpen} onClose={() => setNavigationOpen(false)} placement="left" width={264} className="navigation-drawer" destroyOnHidden>
-        {navigation}
+        {navigation()}
       </Drawer>
       <Layout className="app-main">
         <Layout.Header className="topbar">
           <div className="topbar-context">
+            <Button className="sidebar-toggle" aria-controls="desktop-navigation" aria-expanded={!sidebarCollapsed} aria-label={t(sidebarCollapsed ? "展开侧栏" : "折叠侧栏")} title={t(sidebarCollapsed ? "展开侧栏" : "折叠侧栏")} icon={sidebarCollapsed ? <MenuUnfoldOutlined /> : <MenuFoldOutlined />} onClick={toggleSidebar} />
             <Button className="navigation-toggle" aria-label={t("打开导航")} aria-expanded={navigationOpen} icon={<MenuOutlined />} onClick={() => setNavigationOpen(true)} />
             <span className="header-context">{localizedMenu.find(item => item.key === selected)?.label || t("管理控制台")}</span>
           </div>

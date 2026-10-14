@@ -83,3 +83,40 @@ test('short desktop keeps all navigation reachable independently of content scro
   await expect(page.getByRole('menuitem',{name:'策略配置'})).toBeInViewport();
   await page.screenshot({path:'test-results/dashboard-short-desktop.png',fullPage:true});
 });
+
+test('desktop sidebar collapses, preserves routes and preferences, and leaves mobile navigation expanded',async({page})=>{
+  await page.setViewportSize({width:1280,height:720});await login(page);await page.goto('/tasks');
+  const content=page.locator('.content-scroll');const sidebar=page.locator('.sidebar');
+  await expect.poll(async()=>Math.round((await sidebar.boundingBox())!.width)).toBe(224);
+  const before=(await content.boundingBox())!.width;
+  await page.getByRole('button',{name:'折叠侧栏',exact:true}).click();
+  await expect.poll(async()=>Math.round((await sidebar.boundingBox())!.width)).toBe(64);
+  expect((await content.boundingBox())!.width).toBeGreaterThan(before);
+  await expect(page.getByRole('heading',{name:'GPU 任务',exact:true})).toBeVisible();
+  const nav=sidebar.getByRole('navigation');
+  await nav.getByRole('menuitem',{name:'策略配置',exact:true}).hover();await expect(page.getByRole('tooltip')).toContainText('策略配置');
+  await nav.getByRole('menuitem',{name:'策略配置',exact:true}).click();await expect(page.getByRole('heading',{name:'策略与初始化配置',exact:true})).toBeVisible();
+  await page.reload();await expect(page.getByRole('button',{name:'展开侧栏',exact:true})).toBeVisible();await expect.poll(async()=>Math.round((await sidebar.boundingBox())!.width)).toBe(64);
+  await page.locator('.language-select').click();await page.getByText('English',{exact:true}).last().click();
+  await nav.getByRole('menuitem',{name:'GPU tasks',exact:true}).hover();await expect(page.getByRole('tooltip')).toContainText('GPU tasks');
+  await page.setViewportSize({width:375,height:812});await expect(sidebar).not.toBeVisible();await page.getByRole('button',{name:'Open navigation',exact:true}).click();const drawer=page.getByRole('dialog');
+  await expect(drawer.getByRole('menuitem',{name:'GPU tasks',exact:true})).toBeVisible();await drawer.getByRole('menuitem',{name:'GPU tasks',exact:true}).click();await expect(drawer).not.toBeVisible();
+  await expect(page.getByRole('heading',{name:'GPU tasks',exact:true})).toBeVisible();await expect.poll(()=>page.evaluate(()=>document.documentElement.scrollWidth)).toBe(375);
+  await page.setViewportSize({width:1280,height:720});const expand=page.getByRole('button',{name:'Expand sidebar',exact:true});await expand.focus();await expand.press('Enter');await expect.poll(async()=>Math.round((await sidebar.boundingBox())!.width)).toBe(224);
+  await page.reload();await expect(page.getByRole('button',{name:'Collapse sidebar',exact:true})).toBeVisible();
+});
+
+test('sidebar preference safely falls back and toggles when browser storage is blocked',async({page})=>{
+  await page.addInitScript(()=>{
+    localStorage.setItem('gpupm.sidebar.collapsed','invalid');
+    const get=Storage.prototype.getItem,set=Storage.prototype.setItem;
+    Storage.prototype.getItem=function(key){if(key==='gpupm.sidebar.collapsed')throw new Error('storage blocked');return get.call(this,key);};
+    Storage.prototype.setItem=function(key,value){if(key==='gpupm.sidebar.collapsed')throw new Error('storage blocked');return set.call(this,key,value);};
+  });
+  const errors:string[]=[];page.on('pageerror',e=>errors.push(e.message));
+  await page.setViewportSize({width:1280,height:600});await login(page);await page.getByRole('button',{name:'折叠侧栏',exact:true}).click();
+  const sidebar=page.locator('.sidebar');await expect.poll(async()=>Math.round((await sidebar.boundingBox())!.width)).toBe(64);
+  const navigation=sidebar.getByRole('navigation');await navigation.evaluate(el=>{el.scrollTop=el.scrollHeight;});await expect(navigation.getByRole('menuitem',{name:'策略配置',exact:true})).toBeInViewport();
+  const scroll=await navigation.evaluate(el=>el.scrollTop);await page.locator('.content-scroll').evaluate(el=>{el.scrollTop=el.scrollHeight;});expect(await navigation.evaluate(el=>el.scrollTop)).toBe(scroll);
+  await page.getByRole('button',{name:'展开侧栏',exact:true}).click();await expect.poll(async()=>Math.round((await sidebar.boundingBox())!.width)).toBe(224);expect(errors).toEqual([]);
+});

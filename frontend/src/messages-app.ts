@@ -1,4 +1,6 @@
 export const appMessages: Record<string, string> = {
+  "展开侧栏": "Expand sidebar",
+  "折叠侧栏": "Collapse sidebar",
   "服务器总览": "Server overview",
   "GPU 任务": "GPU tasks",
   "业务优先级组": "Business priority groups",

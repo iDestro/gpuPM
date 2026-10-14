@@ -18,10 +18,12 @@ import {
   Tag,
   Tree,
   Typography,
+  Tooltip,
 } from "antd";
 import { Link, useParams } from "react-router-dom";
 import { api, bytes, date, duration, params, queryClient } from "./api";
 import {
+  CompactText,
   EditDialog,
   ErrorAlert,
   Field,
@@ -30,6 +32,7 @@ import {
   Row,
   Source,
   Status,
+  statusLabel,
   TerminationDialog,
   useData,
   useSave,
@@ -81,8 +84,23 @@ const taskFields: Field[] = [
   },
 ];
 const scopeOptions = [{ label: "人员账号", value: "human" }, { label: "其他账号（只读）", value: "other" }, { label: "全部账号", value: "all" }];
-const classification = { title: "分类", dataIndex: "is_human", render: (v: boolean) => <Tag>{v ? "人员账号" : "其他账号 · 只读"}</Tag> };
+const classification = { width: 145, title: "分类", dataIndex: "is_human", render: (v: boolean) => <Tag>{v ? "人员账号" : "其他账号 · 只读"}</Tag> };
 const label = (value: any) => (value == null ? "无数据" : String(value));
+const compactDate = (value: string | null | undefined) => (
+  <Tooltip title={`${date(value)} · Asia/Shanghai`}>
+    <span className="compact-text" tabIndex={0} title={`${date(value)} · Asia/Shanghai`}>{date(value).replace(/^(\d{4})\//, "").replace(/:\d{2}$/, "")}</span>
+  </Tooltip>
+);
+const auditActions: Record<string, string> = {
+  "auth.login": "管理员登录", "group.create": "创建业务组", "group.update": "修改业务组", "group.delete": "删除业务组",
+  "user.update": "修改用户策略", "settings.update": "修改全局策略", "task.policy": "修改任务策略",
+  "task.merge": "合并任务", "task.split": "拆分任务", "task.members": "修改任务成员", "task.terminate": "终止任务",
+  "account.management_import": "迁移账号管理记录",
+  "account.create": "创建账号", "account.update": "修改账号", "account.disable": "停用账号", "account.enable": "启用账号",
+  "account.delete": "软删除账号", "account.restore": "恢复账号", "account.password": "修改账号密码",
+  "system_group.create": "创建系统组", "system_group.update": "修改系统组", "system_group.delete": "删除系统组",
+  "share.create": "创建共享目录", "share.update": "修改共享授权",
+};
 export function PageHead({
   title,
   description,
@@ -104,7 +122,7 @@ export function PageHead({
 }
 function RecordDetail({ row }: { row: Row }) {
   return (
-    <Descriptions column={{ xs: 1, sm: 2, lg: 3 }} size="small">
+    <Descriptions className="record-detail" column={{ xs: 1, sm: 2, lg: 3 }} size="small">
       {Object.entries(row).map(([k, v]) => (
         <Descriptions.Item key={k} label={k}>
           {typeof v === "object" ? JSON.stringify(v) : label(v)}
@@ -120,7 +138,7 @@ export function Overview() {
     <>
       <PageHead
         title="服务器总览"
-        description="持续观察 GPU、任务期限与异常。每 10 秒刷新；后台标签页暂停轮询。"
+        description="GPU 资源、运行任务与异常概况。"
       />
       <ErrorAlert error={q.error} />
       {d ? (
@@ -166,7 +184,7 @@ export function Overview() {
                     }
                   >
                     <Typography.Paragraph type="secondary">
-                      {gpu.uuid}
+                      <CompactText value={gpu.uuid} />
                     </Typography.Paragraph>
                     <ErrorAlert error={gpu.error} />
                     <Space className="gpu-values" wrap>
@@ -227,7 +245,7 @@ export function Tasks() {
     <>
       <PageHead
         title="GPU 任务"
-        description="默认展示运行中的人员账号任务。其他任务只读，保护任务禁止终止；严格按业务组 → 用户 → 任务优先级排序，不改变 Linux 或 GPU 调度。"
+        description="运行中的人员任务，按业务组 → 用户 → 任务优先级排序。其他任务只读，保护任务禁止终止。"
         action={
           <Button
             disabled={selected.length < 2}
@@ -297,6 +315,8 @@ export function Tasks() {
         <ErrorAlert error={q.error || save.error} />
         {data ? <Source data={data} /> : null}
         <Table<Row>
+          size="small"
+          tableLayout="fixed"
           loading={q.isPending}
           rowKey="id"
           dataSource={data?.items || []}
@@ -306,7 +326,7 @@ export function Tasks() {
             onChange: setSelected,
             getCheckboxProps: (r) => ({ disabled: !r.is_human || r.protected }),
           }}
-          scroll={{ x: 1000 }}
+          scroll={{ x: 1120 }}
           pagination={{
             current: filter.page,
             pageSize: filter.page_size,
@@ -320,34 +340,38 @@ export function Tasks() {
           columns={[
             {
               title: "任务",
+              width: 210,
               dataIndex: "name",
-              render: (v, r) => <Link to={`/tasks/${r.id}`}>{v || r.id}</Link>,
+              render: (v, r) => <Link to={`/tasks/${r.id}`}><CompactText value={v || r.id} /></Link>,
             },
-            { title: "用户", dataIndex: "username" },
-            classification,
+            { title: "用户", dataIndex: "username", width: 120, render: (v, r) => <div className="table-identity"><CompactText value={v} />{!r.is_human ? <Tag>只读</Tag> : null}</div> },
             {
-              title: "三级优先级",
+              title: "优先级",
+              width: 120,
               dataIndex: "priority_tuple",
               render: (v) => <Tag>{v?.join(" / ") || "—"}</Tag>,
             },
             {
               title: "运行时间",
+              width: 110,
               dataIndex: "runtime_seconds",
               render: duration,
             },
             {
               title: "剩余时间",
+              width: 110,
               dataIndex: "remaining_seconds",
               render: (v, r) => (
                 <span className={r.overdue ? "danger" : ""}>{duration(v)}</span>
               ),
             },
-            { title: "显存", dataIndex: "memory_used", render: bytes },
+            { title: "显存", dataIndex: "memory_used", width: 100, render: bytes },
             {
               title: "状态",
+              width: 150,
               dataIndex: "status",
               render: (v, r) => (
-                <Space>
+                <Space wrap>
                   <Status value={v} />
                   {r.protected ? <Tag>保护</Tag> : null}
                   {r.overdue ? <Tag color="red">超时</Tag> : null}
@@ -356,10 +380,12 @@ export function Tasks() {
             },
             {
               title: "操作",
+              width: 100,
               render: (_, r) => <Button danger size="small" disabled={!r.is_human || r.protected} onClick={() => setTermination(r)}>终止任务</Button>,
             },
             {
               title: "异常",
+              width: 60,
               dataIndex: "anomalies",
               render: (v) =>
                 v?.length ? <Tag color="orange">{v.length} 项</Tag> : "—",
@@ -538,31 +564,36 @@ export function TaskDetail() {
             />
             <Table<Row>
               size="small"
+              tableLayout="fixed"
               rowKey={(p: Row) => JSON.stringify(p.identity)}
               dataSource={d.members || []}
               rowSelection={{ selectedRowKeys: chosen, onChange: setChosen, getCheckboxProps: () => ({ disabled: !d.is_human || d.protected }) }}
               pagination={false}
-              scroll={{ x: 1000 }}
+              scroll={{ x: 1500 }}
               columns={[
                 {
                   title: "PID / PPID",
+                  width: 140,
                   render: (_, p) => `${p.pid} / ${p.ppid}`,
                 },
                 {
                   title: "状态",
+                  width: 190,
                   dataIndex: "status",
                   render: (v) => <Status value={v} />,
                 },
-                { title: "GPU / 显存", render: (_, p) => gpuText(p) },
-                { title: "命令", dataIndex: "command", ellipsis: true },
-                { title: "启动时间", dataIndex: "create_time", render: date },
+                { title: "GPU / 显存", width: 190, render: (_, p) => <CompactText value={gpuText(p)} /> },
+                { title: "命令", dataIndex: "command", width: 280, render: (v) => <CompactText value={v} /> },
+                { title: "启动时间", dataIndex: "create_time", width: 140, render: compactDate },
                 {
                   title: "关联依据",
+                  width: 200,
                   dataIndex: "evidence",
-                  render: (v) => JSON.stringify(v),
+                  render: (v) => <CompactText value={v} />,
                 },
                 {
                   title: "操作",
+                  width: 130,
                   render: (_, p) => (
                     <Button
                       danger
@@ -661,20 +692,25 @@ export function BusinessGroups() {
       <ErrorAlert error={q.error || save.error} />
       <Card>
         <Table<Row>
+          scroll={{ x: 1100 }}
+          size="small"
+          tableLayout="fixed"
           loading={q.isPending}
           rowKey="id"
           dataSource={q.data || []}
           columns={[
-            { title: "组名", dataIndex: "name" },
-            { title: "优先级", dataIndex: "priority" },
-            { title: "备注", dataIndex: "notes" },
+            { title: "组名", dataIndex: "name", width: 150, render: (v) => <CompactText value={v} /> },
+            { title: "优先级", dataIndex: "priority", width: 140 },
+            { title: "备注", dataIndex: "notes", width: 240, render: (v) => <CompactText value={v} /> },
             {
               title: "默认组",
+              width: 140,
               dataIndex: "is_default",
               render: (v) => (v ? "是" : "否"),
             },
             {
               title: "操作",
+              width: 190,
               render: (_, r) => (
                 <Space>
                   <Button size="small" onClick={() => setEdit(r)}>
@@ -754,23 +790,28 @@ export function BusinessUsers() {
       <ErrorAlert error={q.error || save.error} />
       <Card>
         <Table<Row>
+          scroll={{ x: 1100 }}
+          size="small"
+          tableLayout="fixed"
           rowKey="uid"
           loading={q.isPending}
           dataSource={q.data || []}
           columns={[
-            { title: "用户", dataIndex: "username" },
-            { title: "UID", dataIndex: "uid" },
+            { title: "用户", dataIndex: "username", width: 150, render: (v) => <CompactText value={v} /> },
+            { title: "UID", dataIndex: "uid", width: 140 },
             classification,
             {
               title: "业务组",
+              width: 140,
               dataIndex: "group_id",
               render: (v) =>
-                groups.data?.find((g: Row) => g.id === v)?.name || v,
+                <CompactText value={groups.data?.find((g: Row) => g.id === v)?.name || v} />,
             },
-            { title: "用户优先级", dataIndex: "priority" },
-            { title: "备注", dataIndex: "notes" },
+            { title: "用户优先级", dataIndex: "priority", width: 140 },
+            { title: "备注", dataIndex: "notes", width: 240, render: (v) => <CompactText value={v} /> },
             {
               title: "操作",
+              width: 130,
               render: (_, r) => (
                 <Button size="small" disabled={!r.is_human} onClick={() => setEdit(r)}>
                   编辑策略
@@ -867,7 +908,7 @@ export function Accounts() {
     <>
       <PageHead
         title="Linux 本地账号"
-        description="默认展示人员账号；其他与保护账号只读。账号软删除保留全部文件与进程，普通账号需明确纳管后方可操作。"
+        description="默认展示人员账号；其他与保护账号只读。账号软删除保留全部文件与进程，已有账号需先启用管理，平台新建账号自动管理。"
         action={
           <Button
             type="primary"
@@ -885,7 +926,7 @@ export function Accounts() {
         }
       />
       <Card>
-        <Space className="filters">
+        <Space wrap className="filters">
           <Select aria-label="账号范围" value={scope} options={scopeOptions} onChange={setScope} />
           <Select
             aria-label="账号状态"
@@ -903,56 +944,53 @@ export function Accounts() {
         </Space>
         <ErrorAlert error={q.error || save.error} />
         <Table<Row>
+          size="small"
+          tableLayout="fixed"
           loading={q.isPending}
           rowKey="id"
           dataSource={q.data || []}
-          scroll={{ x: 1150 }}
+          scroll={{ x: 1100 }}
           columns={[
             {
               title: "账号",
+              width: 180,
               dataIndex: "username",
               render: (v, r) => (
-                <Button type="link" onClick={() => setView(r)}>
-                  {v}
-                </Button>
+                <div>
+                  <Button type="link" className="account-link" onClick={() => setView(r)}><CompactText value={v} /></Button>
+                  <small className="account-id">UID {r.uid} · GID {r.gid}</small>
+                </div>
               ),
             },
-            { title: "UID / GID", render: (_, r) => `${r.uid} / ${r.gid}` },
             classification,
             {
               title: "状态",
+              width: 190,
               dataIndex: "status",
               render: (v, r) => (
                 <Space wrap>
                   <Status value={v} />
                   {r.protected ? <Tag>保护</Tag> : null}
-                  {!r.managed ? <Tag>未纳管</Tag> : null}
-                  {r.disabled ? <Tag color="orange">停用限制</Tag> : null}
-                  {r.deleted_at ? <Tag color="red">软删除限制</Tag> : null}
+                  {!r.managed ? <Tag>未启用管理</Tag> : null}
+                  {r.disabled && v !== "disabled" ? <Tag color="orange">停用限制</Tag> : null}
+                  {r.deleted_at && v !== "deleted" ? <Tag color="red">软删除限制</Tag> : null}
                 </Space>
               ),
             },
-            { title: "有效期", render: (_, r) => <>{r.expires_on || "不限期"}<br />{r.expires_effective_at ? date(r.expires_effective_at) : "生效时间以宿主机核验为准"}</> },
+            { title: "有效期", width: 120, render: (_, r) => <span title={r.expires_effective_at ? `${date(r.expires_effective_at)} · Asia/Shanghai` : "生效时间以宿主机核验为准"}>{r.expires_effective_at?.slice(0, 10) || r.expires_on || "不限期"}</span> },
             {
               title: "目录",
+              width: 160,
               render: (_, r) => (
-                <>
-                  {r.home}
-                  <br />
-                  {r.data_dir}
-                </>
+                <CompactText value={[r.home, r.data_dir].filter(Boolean).join(" · ")} />
               ),
             },
             {
-              title: "登录策略",
-              dataIndex: "login_policy_status",
-              render: (v) => (typeof v === "object" ? JSON.stringify(v) : v),
-            },
-            {
               title: "操作",
+              width: 270,
               fixed: "right",
               render: (_, r) => (
-                <Space wrap>
+                <Space>
                   <Button
                     size="small"
                     disabled={!r.is_human || r.protected || !r.managed || !!r.deleted_at || r.recovery_required}
@@ -965,7 +1003,7 @@ export function Accounts() {
                       size="small"
                       onClick={() => setAction({ row: r, action: "update" })}
                     >
-                      明确纳管
+                      启用管理
                     </Button>
                   ) : null}
                   <Button
@@ -1028,7 +1066,7 @@ export function Accounts() {
       ) : null}
       {action ? (
         <PreviewDialog
-          title={`账号操作预览 · ${{ disable: "停用", enable: "启用", delete: "软删除", restore: "恢复", update: action.row.managed ? "修改" : "纳管" }[action.action]}`}
+          title={`账号操作预览 · ${{ disable: "停用", enable: "启用", delete: "软删除", restore: "恢复", update: action.row.managed ? "修改" : "启用管理" }[action.action]}`}
           previewPath={`/system-users/${action.row.id}/change-preview`}
           previewBody={{
             action: action.action,
@@ -1294,19 +1332,24 @@ export function SystemGroups() {
       <ErrorAlert error={q.error || save.error} />
       <Card>
         <Table<Row>
+          scroll={{ x: 1100 }}
+          size="small"
+          tableLayout="fixed"
           rowKey="id"
           loading={q.isPending}
           dataSource={q.data || []}
           columns={[
-            { title: "组名", dataIndex: "name" },
-            { title: "GID", dataIndex: "gid" },
+            { title: "组名", dataIndex: "name", width: 150, render: (v) => <CompactText value={v} /> },
+            { title: "GID", dataIndex: "gid", width: 140 },
             {
               title: "附属组成员",
+              width: 240,
               dataIndex: "members",
-              render: (v) => v?.join(", "),
+              render: (v) => <CompactText value={v?.join(", ")} />,
             },
             {
-              title: "保护 / 纳管",
+              title: "管理状态",
+              width: 140,
               render: (_, r) => (
                 <Space>
                   {r.protected ? <Tag>保护</Tag> : null}
@@ -1316,6 +1359,7 @@ export function SystemGroups() {
             },
             {
               title: "操作",
+              width: 190,
               render: (_, r) => (
                 <Space>
                   <Button
@@ -1401,16 +1445,20 @@ export function Storage() {
           ) : null}
           <Card title="文件系统" className="section-card">
             <Table<Row>
+          scroll={{ x: 1100 }}
+              size="small"
+              tableLayout="fixed"
               rowKey="id"
               dataSource={d.filesystems || []}
               pagination={false}
               columns={[
-                { title: "路径", dataIndex: "path" },
-                { title: "类型", dataIndex: "fstype" },
-                { title: "总容量", dataIndex: "total", render: bytes },
-                { title: "可用", dataIndex: "available", render: bytes },
+                { title: "路径", dataIndex: "path", width: 240, render: (v) => <CompactText value={v} /> },
+                { title: "类型", dataIndex: "fstype", width: 140 },
+                { title: "总容量", dataIndex: "total", width: 140, render: bytes },
+                { title: "可用", dataIndex: "available", width: 140, render: bytes },
                 {
                   title: "配额支持",
+                  width: 140,
                   render: (_, r) =>
                     r.quota_supported
                       ? r.quota_enabled
@@ -1418,22 +1466,26 @@ export function Storage() {
                         : "尚未启用"
                       : "不支持",
                 },
-                { title: "检测结果", dataIndex: "error" },
+                { title: "检测结果", dataIndex: "error", width: 240, render: (v) => <CompactText value={v} /> },
               ]}
             />
           </Card>
           <Card title="个人目录用量" className="section-card">
             <Table<Row>
+          scroll={{ x: 1100 }}
+              size="small"
+              tableLayout="fixed"
               rowKey="account_id"
               dataSource={d.users || []}
               columns={[
-                { title: "用户", dataIndex: "username" },
-                { title: "主目录", dataIndex: "home_bytes", render: bytes },
-                { title: "数据目录", dataIndex: "data_bytes", render: bytes },
-                { title: "文件数", dataIndex: "files", render: label },
-                { title: "采样时间", dataIndex: "collected_at", render: date },
+                { title: "用户", dataIndex: "username", width: 150, render: (v) => <CompactText value={v} /> },
+                { title: "主目录", dataIndex: "home_bytes", width: 140, render: bytes },
+                { title: "数据目录", dataIndex: "data_bytes", width: 140, render: bytes },
+                { title: "文件数", dataIndex: "files", width: 140, render: label },
+                { title: "采样时间", dataIndex: "collected_at", width: 140, render: compactDate },
                 {
                   title: "状态",
+                  width: 190,
                   dataIndex: "status",
                   render: (v) => <Status value={v} />,
                 },
@@ -1478,22 +1530,27 @@ export function Shares() {
       <ErrorAlert error={q.error || save.error} />
       <Card className="section-card">
         <Table<Row>
+          scroll={{ x: 1100 }}
+          size="small"
+          tableLayout="fixed"
           rowKey="id"
           loading={q.isPending}
           dataSource={q.data || []}
           columns={[
-            { title: "项目", dataIndex: "name" },
-            { title: "路径", dataIndex: "path" },
-            { title: "只读组", dataIndex: "reader_group" },
-            { title: "读写组", dataIndex: "writer_group" },
-            { title: "用量", dataIndex: "usage_bytes", render: bytes },
+            { title: "项目", dataIndex: "name", width: 150, render: (v) => <CompactText value={v} /> },
+            { title: "路径", dataIndex: "path", width: 240, render: (v) => <CompactText value={v} /> },
+            { title: "只读组", dataIndex: "reader_group", width: 150, render: (v) => <CompactText value={v} /> },
+            { title: "读写组", dataIndex: "writer_group", width: 150, render: (v) => <CompactText value={v} /> },
+            { title: "用量", dataIndex: "usage_bytes", width: 140, render: bytes },
             {
               title: "状态",
+              width: 190,
               dataIndex: "status",
               render: (v) => <Status value={v} />,
             },
             {
               title: "操作",
+              width: 130,
               render: (_, r) => (
                 <Button size="small" onClick={() => setEdit(r)}>
                   编辑授权
@@ -1667,8 +1724,8 @@ export function Logs({ kind }: { kind: "audit" | "login" }) {
             allowClear
             options={(login
               ? ["success", "failure"]
-              : ["success", "failed"]
-            ).map((value) => ({ label: value, value }))}
+              : ["succeeded", "failed", "pending", "demo"]
+            ).map((value) => ({ label: statusLabel(value), value }))}
             onChange={(v) => set("result", v)}
           />
           <Input
@@ -1698,18 +1755,18 @@ export function Logs({ kind }: { kind: "audit" | "login" }) {
         </Space>
         <ErrorAlert error={q.error} />
         {login && q.data ? (
-          <Alert
-            showIcon
-            type="info"
-            message="日志扫描覆盖"
-            description={<JsonView value={q.data.coverage} />}
-          />
+          <details className="log-coverage">
+            <summary><span>日志扫描覆盖</span><Typography.Text type="secondary">{typeof q.data.coverage === "object" ? q.data.coverage?.status ? statusLabel(q.data.coverage.status) : "查看来源与历史覆盖" : q.data.coverage}</Typography.Text></summary>
+            <JsonView value={q.data.coverage} />
+          </details>
         ) : null}
         <Table<Row>
+          size="small"
+          tableLayout="fixed"
           loading={q.isPending}
           rowKey="id"
           dataSource={q.data?.items || []}
-          scroll={{ x: 1000 }}
+          scroll={{ x: 1100 }}
           expandable={{ expandedRowRender: (r) => <RecordDetail row={r} /> }}
           pagination={{
             current: filters.page,
@@ -1722,33 +1779,35 @@ export function Logs({ kind }: { kind: "audit" | "login" }) {
           columns={
             login
               ? [
-                  { title: "时间", dataIndex: "time", render: date },
-                  { title: "用户名", dataIndex: "username" },
-                  { title: "来源 IP", dataIndex: "ip" },
-                  { title: "登录方式", dataIndex: "method" },
+                  { title: "时间", dataIndex: "time", width: 140, render: compactDate },
+                  { title: "用户名", dataIndex: "username", width: 150, render: (v) => <CompactText value={v} /> },
+                  { title: "来源 IP", dataIndex: "ip", width: 150, render: (v) => <CompactText value={v} /> },
+                  { title: "登录方式", dataIndex: "method", width: 150, render: (v) => <CompactText value={v} /> },
                   {
                     title: "结果",
+                    width: 100,
                     dataIndex: "result",
                     render: (v) => <Status value={v} />,
                   },
-                  { title: "公钥指纹", dataIndex: "fingerprint" },
+                  { title: "公钥指纹", dataIndex: "fingerprint", width: 240, render: (v) => <CompactText value={v} /> },
                 ]
               : [
-                  { title: "时间", dataIndex: "time", render: date },
-                  { title: "操作人", dataIndex: "actor" },
-                  { title: "操作", dataIndex: "action" },
+                  { title: "时间", dataIndex: "time", width: 140, render: compactDate },
+                  { title: "操作人", dataIndex: "actor", width: 150, render: (v) => <CompactText value={v} /> },
+                  { title: "操作", dataIndex: "action", width: 180, render: (v) => <CompactText value={auditActions[v] || v} /> },
                   {
                     title: "目标",
+                    width: 260,
                     dataIndex: "target",
-                    render: (v) =>
-                      typeof v === "object" ? JSON.stringify(v) : v,
+                    render: (v) => <CompactText value={v} />,
                   },
                   {
                     title: "结果",
+                    width: 100,
                     dataIndex: "result",
                     render: (v) => <Status value={v} />,
                   },
-                  { title: "原因", dataIndex: "reason" },
+                  { title: "原因", dataIndex: "reason", width: 240, render: (v) => <CompactText value={v} /> },
                 ]
           }
         />

@@ -1,8 +1,9 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   Alert,
   Button,
   Card,
+  Drawer,
   Form,
   Input,
   Layout,
@@ -23,6 +24,7 @@ import {
   FolderOpenOutlined,
   LoginOutlined,
   LogoutOutlined,
+  MenuOutlined,
 } from "@ant-design/icons";
 import {
   Navigate,
@@ -65,8 +67,13 @@ export default function App() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<unknown>();
   const [logoutBusy, setLogoutBusy] = useState(false);
+  const [navigationOpen, setNavigationOpen] = useState(false);
+  const contentRef = useRef<HTMLDivElement>(null);
   const navigate = useNavigate();
   const location = useLocation();
+  useEffect(() => {
+    if (contentRef.current) contentRef.current.scrollTop = 0;
+  }, [location.pathname]);
   useEffect(() => {
     let active = true;
     api<{mode:string}>("/health").then(value => { if (active) setMode(value.mode); }).catch(() => {});
@@ -185,53 +192,47 @@ export default function App() {
   const selected = location.pathname.startsWith("/tasks/")
     ? "/tasks"
     : location.pathname;
+  const navigationItems = [
+    { type: "group" as const, label: "资源监控", children: menu.slice(0, 2) },
+    { type: "group" as const, label: "账号与权限", children: [menu[4], menu[5], menu[2], menu[3]] },
+    { type: "group" as const, label: "存储协作", children: menu.slice(6, 8) },
+    { type: "group" as const, label: "记录与设置", children: [menu[8], menu[10], menu[9]] },
+  ];
+  const navigation = <>
+    <div className="brand">
+      <span className="brand-mark">G</span>
+      <div>gpuPM<small>服务器管理</small></div>
+    </div>
+    <nav className="sidebar-menu" aria-label="主导航">
+      <Menu selectedKeys={[selected]} items={navigationItems} onClick={({ key }) => {
+        navigate(key);
+        setNavigationOpen(false);
+      }} />
+    </nav>
+    <div className="sidebar-footer">单机控制台 <span>UTC+8</span></div>
+  </>;
   return (
     <Layout className="app-layout">
-      <Layout.Sider
-        breakpoint="lg"
-        collapsedWidth={64}
-        width={238}
-        className="sidebar"
-      >
-        <div className="brand">
-          <span className="brand-mark">G</span>
-          <div>
-            gpuPM<small>SERVER CONTROL</small>
-          </div>
-        </div>
-        <div className="sidebar-caption">服务器管理工作台</div>
-        <Menu
-          theme="dark"
-          selectedKeys={[selected]}
-          items={menu}
-          onClick={({ key }) => navigate(key)}
-        />
-        <div className="sidebar-footer">
-          业务优先级 ≠ 系统权限
-          <br />
-          单机管理 · 管理员入口
-        </div>
-      </Layout.Sider>
-      <Layout>
+      <a href="#main-content" className="skip-link">跳转到内容</a>
+      <Layout.Sider width={224} theme="light" className="sidebar">{navigation}</Layout.Sider>
+      <Drawer title="导航" open={navigationOpen} onClose={() => setNavigationOpen(false)} placement="left" width={264} className="navigation-drawer" destroyOnHidden>
+        {navigation}
+      </Drawer>
+      <Layout className="app-main">
         <Layout.Header className="topbar">
-          <Space>
-            <span className="status-dot" />
-            管理控制台<Tag>Asia/Shanghai</Tag>
-            <Tag color={mode === "demo" ? "orange" : "blue"}>{mode === "demo" ? "演示模式 · 不操作宿主机" : mode === "host" ? "宿主机模式" : "模式待核验"}</Tag>
-          </Space>
-          <Space>
-            <Typography.Text>{user.username}</Typography.Text>
-            <Button
-              icon={<LogoutOutlined />}
-              loading={logoutBusy}
-              onClick={logout}
-            >
-              退出
-            </Button>
-          </Space>
+          <div className="topbar-context">
+            <Button className="navigation-toggle" aria-label="打开导航" aria-expanded={navigationOpen} icon={<MenuOutlined />} onClick={() => setNavigationOpen(true)} />
+            <span className="header-context">{menu.find(item => item.key === selected)?.label || "管理控制台"}</span>
+          </div>
+          <div className="topbar-actions">
+            <Tag color={mode === "demo" ? "orange" : "blue"}>{mode === "demo" ? "演示模式 · 不操作宿主机" : mode === "host" ? "真实服务器" : "模式待核验"}</Tag>
+            <Typography.Text className="header-user">{user.username}</Typography.Text>
+            <Button type="text" aria-label="退出" icon={<LogoutOutlined />} loading={logoutBusy} onClick={logout}><span className="logout-label">退出</span></Button>
+          </div>
         </Layout.Header>
-        <Layout.Content className="content">
-          <ErrorAlert error={error} />
+        <div className="content-scroll" role="main" id="main-content" tabIndex={-1} ref={contentRef}>
+          <div className="content">
+            <ErrorAlert error={error} />
           <Routes>
             <Route path="/" element={<Overview />} />
             <Route path="/tasks" element={<Tasks />} />
@@ -247,10 +248,9 @@ export default function App() {
             <Route path="/login-events" element={<Logs key="login" kind="login" />} />
             <Route path="*" element={<Navigate to="/" replace />} />
           </Routes>
-        </Layout.Content>
-        <Layout.Footer className="footer">
-          gpuPM · GPU 服务器运维 · 时间统一显示为 Asia/Shanghai
-        </Layout.Footer>
+          </div>
+          <Layout.Footer className="footer">gpuPM · 时间显示为 Asia/Shanghai</Layout.Footer>
+        </div>
       </Layout>
     </Layout>
   );

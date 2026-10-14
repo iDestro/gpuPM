@@ -14,6 +14,7 @@ import {
   Table,
   Tag,
   Typography,
+  Tooltip,
 } from "antd";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import { api, date, queryClient } from "./api";
@@ -50,6 +51,19 @@ export function ErrorAlert({ error }: { error: unknown }) {
 export function JsonView({ value }: { value: unknown }) {
   return <pre className="json-view">{JSON.stringify(value, null, 2)}</pre>;
 }
+export function CompactText({ value }: { value: unknown }) {
+  const text = value == null || value === "" ? "—" : typeof value === "object" ? JSON.stringify(value) : String(value);
+  return <Tooltip title={text}><span className="compact-text" title={text} tabIndex={0}>{text}</span></Tooltip>;
+}
+export const statusLabel = (value: any) => ({
+  running: "运行中", finished: "已结束", overdue: "已超时", anomaly: "有异常", active: "正常", succeeded: "成功", completed: "已完成",
+  success: "成功", pending: "等待中", disabled: "已停用", expired: "已到期",
+  failed: "失败", failure: "失败", deleted: "已软删除", error: "错误",
+  terminated: "已终止", unavailable: "不可用", available: "可用", partial: "部分完成",
+  queued: "排队中", catching_up: "补扫中", demo: "演示模式", unmanaged: "未启用管理",
+  applied: "已生效", unconfirmed: "未确认", confirmed: "已确认", identity_conflict: "身份冲突",
+  R: "运行中", S: "休眠", D: "等待 I/O", T: "已暂停", Z: "僵尸进程",
+} as Record<string, string>)[value] ?? value ?? "未知";
 export function Status({ value }: { value: any }) {
   const colors: Record<string, string> = {
     running: "green",
@@ -61,10 +75,11 @@ export function Status({ value }: { value: any }) {
     disabled: "orange",
     expired: "orange",
     failed: "red",
+    failure: "red",
     deleted: "red",
     error: "red",
   };
-  return <Tag color={colors[value]}>{value ?? "未知"}</Tag>;
+  return <Tag className="status-tag" color={colors[value]} title={value == null ? undefined : String(value)}>{statusLabel(value)}</Tag>;
 }
 export function Source({ data }: { data: any }) {
   return (

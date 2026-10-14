@@ -1,6 +1,6 @@
 # wzx-ubuntu 试用部署
 
-2026-10-14 已启用，后端功能基于 f3ce9bd，前端基于 edcfd49。三个 systemd 服务已设为开机启动：gpupm-trial-agent、gpupm-trial-api、gpupm-trial-demo。普通 Web 服务使用独立无登录系统账号 gpupm-trial；root agent 配置 allow_mutations=false。
+2026-10-14 已启用，后端功能基于 f3ce9bd，前端为当前 dashboard 整改版本。三个 systemd 服务已设为开机启动：gpupm-trial-agent、gpupm-trial-api、gpupm-trial-demo。普通 Web 服务使用独立无登录系统账号 gpupm-trial；root agent 配置 allow_mutations=false。
 
 - 真实服务器：127.0.0.1:18000，显示 host 来源；读取真实 GPU、任务及账号。原生账号/文件/配额/任务终止操作被禁止。业务备注、优先级等 Web 元数据可以保存。
 - 演示环境：127.0.0.1:18001，显示 demo 来源；修改仅作用于独立演示数据库。
@@ -31,7 +31,7 @@ ssh wzx-ubuntu 'journalctl -u gpupm-trial-api -u gpupm-trial-agent --since today
 human 分类更新：真实账号 wuzhaoxiang、luwangxing、dingpeixuan 以及原有14个 gpupmqa_ QA 账号加入 human（GID1025）。未变更其他组、账号登录限制、文件权限或已有进程凭据。Web 默认展示 human；其他账号/任务仅供查看。维护账号和系统进程原有保护保留。
 
 
-本轮已更新后端与前端并重启三个试用服务。更新前一致备份位于 /var/lib/gpupm-trial/backup-human-1791956706079320318。最新浏览器包 index-Du-YVC4A.js；账号和密码保持不变。新增 QA 改名验收账号也自动加入 human，因此本轮 HTTP 验证共18个 human 账号。scope human/other/all、root 业务修改403、host/demo 来源与新鲜任务快照均通过。实际当前 GPU 占用账号均为 human，其他任务列表为空属于正常结果。
+本轮已更新后端与前端并重启三个试用服务。更新前一致备份位于 /var/lib/gpupm-trial/backup-human-1791956706079320318。最新浏览器包 index-DaLEnkAM.js；账号和密码保持不变。新增 QA 改名验收账号也自动加入 human，因此本轮 HTTP 验证共18个 human 账号。scope human/other/all、root 业务修改403、host/demo 来源与新鲜任务快照均通过。实际当前 GPU 占用账号均为 human，其他任务列表为空属于正常结果。
 
 任务页默认“人员账号＋运行中”，可切换已结束/超时/异常或清除状态筛选。分类文案改为“人员账号／其他账号”，底层 human 组及权限边界保持一致。最新前端27项、Chrome4条流程和构建通过，两个试用入口均已提供新包。
 
@@ -43,3 +43,12 @@ human 分类更新：真实账号 wuzhaoxiang、luwangxing、dingpeixuan 以及�
 15个软删除状态和1个独立停用状态全部保留；真实passwd/shadow及目录属性前后完全一致。配置home根同步为QA home，写能力仍关闭。操作前备份：/var/lib/gpupm-trial/backup-account-import-1791957944791821304。
 
 HTTP验收：默认人员列表仅原有3人；已软删除筛选15人全部managed=true。截图账号gpupmqa_rod366be、gpupmqa_otherd366be均managed=true/status=deleted/有效期为空，不再出现1970日期。三个试用服务active。查看这些QA账号请选择“已软删除”或“全部状态”。
+
+
+## 浅色 dashboard 整改
+
+按用户选择改为浅色简洁布局。桌面侧栏/顶栏固定，主内容独立滚动，短屏菜单独立滚动；手机导航改为抽屉。表格固定列宽、长值省略且悬停/聚焦可查看完整内容，审计展开保留原始字段，登录覆盖默认折叠。账号UID/GID作为副标题，登录策略进入详情；有效期展示实际生效日期。审计成功筛选匹配后端succeeded，普通界面采用“启用管理”。
+
+已发布两个入口：JS index-DaLEnkAM.js，CSS index-BMV94eZ9.css。账号密码和root只读配置保持原设置。实机Chrome核对审计长列表滚动、账号页和375px手机导航；15个QA账号仍已管理/已软删除，未执行原生账号变更。
+
+当前实机截图位于本机 .runtime/preview/dashboard-audit-native.png、dashboard-audit-scrolled-native.png、dashboard-accounts-native.png 和 dashboard-tasks-mobile-native.png（本地检查产物，不入版本库）。

@@ -10,7 +10,7 @@ from uuid import uuid4
 from gpupm.agent.processes import residual_ready, residual_status, shell_process
 from gpupm.domain.schemas import TaskPatch, SettingsPatch
 from gpupm.domain.rules import account_status, parse_time, utcnow, validate_name
-from gpupm.domain.settings import DEFAULT_SETTINGS, task_defaults
+from gpupm.domain.settings import DEFAULT_SETTINGS, task_defaults, ignored_process
 from gpupm.errors import DomainError
 
 SENSITIVE_GROUPS = {"root", "sudo", "docker", "adm", "gpupm", "shadow", "disk", "lxd", "libvirt"}
@@ -56,6 +56,7 @@ class DemoAgent:
                     if account["username"] in members:
                         account["groups"] = sorted(set(account["groups"]) | {"human"})
                 db.execute("UPDATE state SET data=? WHERE id=1", (json.dumps(state),))
+            state["settings"] = dict(DEFAULT_SETTINGS, **state["settings"])
             for task in state["tasks"]:
                 task.setdefault(
                     "original_name",
@@ -265,16 +266,21 @@ class DemoAgent:
             )
         humans = {a["uid"] for a in state["accounts"] if a["is_human"]}
         for task in state["tasks"]:
+            members = task["members"] + task.get("ignored_members", [])
+            task["ignored_members"] = [
+                m for m in members if ignored_process(m, state["settings"]["ignored_task_executables"])
+            ]
+            task["members"] = [
+                m for m in members if not ignored_process(m, state["settings"]["ignored_task_executables"])
+            ]
+            task["ignored"] = bool(task["ignored_members"] and not task["members"])
             for field in ("orphan_reminder", "orphan_wait_seconds"):
                 task.setdefault(field, task_defaults(state["settings"])[field])
             task.setdefault(
                 "leader_identities",
-                [
-                    m["identity"]
-                    for m in task["members"]
-                    if m["ppid"] not in {p["pid"] for p in task["members"]}
-                ],
+                [m["identity"] for m in members if m["ppid"] not in {p["pid"] for p in members}],
             )
+            task["leaders_present"] = any(m["identity"] in task["leader_identities"] for m in members)
             task["is_human"] = task["uid"] in humans
             residual_status(task, utcnow())
         if method in {"preview_group_change", "execute_group_change"}:
@@ -303,8 +309,7 @@ class DemoAgent:
                 account["expires_on"] + "T00:00:00+00:00" if account.get("expires_on") else None
             )
         if method == "heartbeat":
-            SettingsPatch.model_validate(p.get("settings", {}))
-            state["settings"].update(p.get("settings", {}))
+            self.dispatch(state, "configure", dict(settings=p.get("settings", {})))
             return {"status": "ok", "source": "demo"}
         if method == "health":
             return dict(status="ok", source="demo", mutations=True)
@@ -321,8 +326,17 @@ class DemoAgent:
                 capabilities={"mutations": True},
             )
         if method == "configure":
-            SettingsPatch.model_validate(p.get("settings", {}))
-            state["settings"].update(p.get("settings", {}))
+            settings = p.get("settings", {})
+            SettingsPatch.model_validate(settings)
+            changed = (
+                settings.get("ignored_task_executables", state["settings"]["ignored_task_executables"])
+                != state["settings"]["ignored_task_executables"]
+            )
+            state["settings"].update(settings)
+            if changed:
+                state["previews"] = {k: v for k, v in state["previews"].items() if v.get("kind") != "task"}
+                for task in state["tasks"]:
+                    task["revision"] += 1
             return dict(status="applied", source="demo")
         if method == "list_accounts":
             return state["accounts"]
@@ -344,7 +358,7 @@ class DemoAgent:
         if method == "preview_termination":
             task = self.find(state, "tasks", p["task_id"])
             self.require_human(task)
-            if task["protected"] or task["status"] == "finished":
+            if task.get("ignored") or task["protected"] or task["status"] == "finished":
                 raise DomainError("protected", "任务受保护或已结束")
             residual_only = p.get("residual_only", False)
             if residual_only and not residual_ready(task, utcnow()):

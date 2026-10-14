@@ -1646,11 +1646,13 @@ export function Settings() {
     storage_scan_interval_seconds: "存储扫描周期",
     warning_percent: "容量提醒阈值",
     critical_percent: "容量严重阈值",
+    ignored_task_executables: "忽略程序路径",
   };
   const groups = [
     { title: "新任务默认策略", names: ["default_max_runtime_seconds", "default_task_protected", "default_task_priority", "default_deadline_action", "default_orphan_reminder", "default_orphan_wait_seconds"] },
     { title: "扫描与运行策略", names: ["scan_interval_seconds", "term_grace_seconds", "storage_scan_interval_seconds"] },
     { title: "存储告警阈值", names: ["warning_percent", "critical_percent"] },
+    { title: "任务监控白名单", names: ["ignored_task_executables"] },
   ];
   const roots = [
     { name: "home_base", label: "主目录根路径", description: "新账号的主目录根路径，由宿主机初始化配置。" },
@@ -1661,11 +1663,11 @@ export function Settings() {
   const fields: Field[] = Object.entries(labels).map(([name, label]) => ({
     name,
     label,
-    type: ["default_task_protected", "default_orphan_reminder"].includes(name) ? "switch" : name === "default_deadline_action" ? "select" : ["default_max_runtime_seconds", "default_orphan_wait_seconds"].includes(name) ? "duration" : "number",
-    required: !["default_max_runtime_seconds", "default_task_protected", "default_orphan_reminder"].includes(name),
+    type: name === "ignored_task_executables" ? "tags" : ["default_task_protected", "default_orphan_reminder"].includes(name) ? "switch" : name === "default_deadline_action" ? "select" : ["default_max_runtime_seconds", "default_orphan_wait_seconds"].includes(name) ? "duration" : "number",
+    required: !["ignored_task_executables", "default_max_runtime_seconds", "default_task_protected", "default_orphan_reminder"].includes(name),
     min: name === "default_task_priority" ? 0 : name === "storage_scan_interval_seconds" ? 60 : name === "critical_percent" ? 2 : 1,
     max: ({ default_orphan_wait_seconds: 86400, default_task_priority: 100, scan_interval_seconds: 300, term_grace_seconds: 120, storage_scan_interval_seconds: 86400 } as Record<string, number>)[name] ?? (name === "warning_percent" ? 99 : name === "critical_percent" ? 100 : undefined),
-    help: name === "default_max_runtime_seconds" ? "从任务启动时刻计算；留空或点击“不限时”可取消时限" : name === "default_task_protected" ? "保护任务超时只提醒，不自动终止；系统与维护任务的保护仍生效。" : name === "default_orphan_reminder" ? "主进程退出后等待提醒；残留进程仅由管理员预览确认后终止" : ["scan_interval_seconds", "term_grace_seconds", "storage_scan_interval_seconds"].includes(name) ? "单位：秒" : name.endsWith("percent") ? "单位：百分比" : undefined,
+    help: name === "ignored_task_executables" ? "按完整程序路径精确匹配，立即用于已有和新任务；不监控或终止匹配程序，GPU总占用仍统计。留空表示不排除。" : name === "default_max_runtime_seconds" ? "从任务启动时刻计算；留空或点击“不限时”可取消时限" : name === "default_task_protected" ? "保护任务超时只提醒，不自动终止；系统与维护任务的保护仍生效。" : name === "default_orphan_reminder" ? "主进程退出后等待提醒；残留进程仅由管理员预览确认后终止" : ["scan_interval_seconds", "term_grace_seconds", "storage_scan_interval_seconds"].includes(name) ? "单位：秒" : name.endsWith("percent") ? "单位：百分比" : undefined,
     options: name === "default_deadline_action" ? [
       { label: translate("仅提醒"), value: "notify" },
       { label: translate("自动终止"), value: "terminate" },
@@ -1695,7 +1697,7 @@ export function Settings() {
               <Descriptions key={title} title={translate(title)} className="record-detail" layout="vertical" column={{ xs: 1, sm: 2, lg: 3 }} size="small">
                 {names.map((name) => (
                   <Descriptions.Item key={name} label={<TermLabel label={labels[name]} />}>
-                    {name === "default_task_protected" ? translate(q.data[name] ? "已保护" : "未保护")
+                    {name === "ignored_task_executables" ? <Space direction="vertical" size={4}><Space wrap>{q.data[name]?.length ? q.data[name].map((path: string) => <Tag key={path}><CompactText value={path} /></Tag>) : translate("未配置")}</Space><Typography.Text type="secondary">{translate("按完整程序路径精确匹配，立即用于已有和新任务；不监控或终止匹配程序，GPU总占用仍统计。留空表示不排除。")}</Typography.Text></Space> : name === "default_task_protected" ? translate(q.data[name] ? "已保护" : "未保护")
                       : name === "default_orphan_reminder" ? translate(q.data[name] ? "已启用" : "已关闭")
                       : name === "default_deadline_action" ? statusLabel(q.data[name])
                       : ["default_max_runtime_seconds", "default_orphan_wait_seconds"].includes(name) ? q.data[name] == null ? translate("不限时") : preciseDuration(q.data[name])

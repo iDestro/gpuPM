@@ -1,4 +1,8 @@
 export const componentMessages: Record<string, string> = {
+  "任务监控白名单": "Task monitoring allowlist",
+  "忽略程序路径": "Ignored executable paths",
+  "未配置": "Not configured",
+  "按完整程序路径精确匹配，立即用于已有和新任务；不监控或终止匹配程序，GPU总占用仍统计。留空表示不排除。": "Exact executable paths apply to existing and new tasks. Matching programs are excluded from task monitoring and termination; total GPU usage is still reported. Leave empty to disable exclusions.",
   "收尾中": "Finalizing",
   "待清理": "Awaiting cleanup",
   "清理中": "Cleaning",

@@ -5,7 +5,7 @@ import {QueryClientProvider} from '@tanstack/react-query';
 import {queryClient} from './api';
 import {Settings} from './pages';
 import {setLocale} from './i18n';
-const settings={scan_interval_seconds:5,term_grace_seconds:10,default_max_runtime_seconds:3661,storage_scan_interval_seconds:900,warning_percent:80,critical_percent:95,default_deadline_action:'notify',default_task_protected:false,default_task_priority:50,default_cleanup_orphans:false,default_orphan_reminder:true,default_orphan_wait_seconds:300,mode:'host',home_base:'/home',data_base:'/data/实验人员',share_base:'/data/shared'};
+const settings={ignored_task_executables:['/usr/lib/xorg/Xorg','/usr/bin/Xorg'],scan_interval_seconds:5,term_grace_seconds:10,default_max_runtime_seconds:3661,storage_scan_interval_seconds:900,warning_percent:80,critical_percent:95,default_deadline_action:'notify',default_task_protected:false,default_task_priority:50,default_cleanup_orphans:false,default_orphan_reminder:true,default_orphan_wait_seconds:300,mode:'host',home_base:'/home',data_base:'/data/实验人员',share_base:'/data/shared'};
 afterEach(()=>{cleanup();vi.unstubAllGlobals();queryClient.clear();setLocale('zh-CN');});
 function setup(){setLocale('zh-CN');vi.stubGlobal('fetch',vi.fn(async()=>new Response(JSON.stringify(settings))));render(<QueryClientProvider client={queryClient}><Settings/></QueryClientProvider>);}
 test('settings show precise units and Chinese terms with professional English while preserving raw paths',async()=>{
@@ -69,4 +69,26 @@ test.each([false,true])('settings save zero priority and reminder=%s without ini
   expect(writes[0][0]).toBe('/api/settings');
   const {mode,home_base,data_base,share_base,default_cleanup_orphans,...editable}=settings;
   expect(JSON.parse(String(writes[0][1]?.body))).toEqual({...editable,default_task_priority:0,default_task_protected:false,default_orphan_reminder:reminder});
+},10000);
+
+test('allowlist paths and their exact-match scope are bilingual',async()=>{
+  setup();
+  await screen.findByText('任务监控白名单');
+  expect(screen.getByText('/usr/lib/xorg/Xorg')).toBeInTheDocument();
+  act(()=>setLocale('en-US'));
+  expect(screen.getByText('Task monitoring allowlist')).toBeInTheDocument();
+  expect(screen.getByText('/usr/lib/xorg/Xorg')).toBeInTheDocument();
+});
+test('allowlist supports explicit empty paths and never writes task policies',async()=>{
+  setup();
+  await userEvent.click(await screen.findByText('编辑策略',{selector:'span'}));
+  const input=screen.getByLabelText('忽略程序路径');
+  await userEvent.click(input);
+  await userEvent.keyboard('{Backspace}{Backspace}');
+  await userEvent.click(screen.getByText(/^保\s*存$/,{selector:'span'}));
+  await waitFor(()=>expect(vi.mocked(fetch).mock.calls.some(([,options])=>options?.method==='PATCH')).toBe(true));
+  const writes=vi.mocked(fetch).mock.calls.filter(([,options])=>options?.method==='PATCH');
+  expect(writes).toHaveLength(1);
+  expect(writes[0][0]).toBe('/api/settings');
+  expect(JSON.parse(String(writes[0][1]?.body)).ignored_task_executables).toEqual([]);
 },10000);

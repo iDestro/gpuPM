@@ -128,7 +128,9 @@ def test_root_configure_validates_template_at_boundary(tmp_path, field, value):
         service.call("configure", {"settings": {field: value}})
     assert error.value.code == "invalid_settings"
     with service.database() as db:
-        assert service.load(db)["settings"] == {}
+        assert service.load(db)["settings"] == {
+            "ignored_task_executables": ["/usr/lib/xorg/Xorg", "/usr/bin/Xorg"]
+        }
 
 
 def test_root_configure_rejects_readonly_paths(tmp_path):

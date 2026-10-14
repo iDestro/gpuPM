@@ -98,3 +98,11 @@ Ubuntu171项后端测试、60项前端测试、11条Chrome E2E与构建通过；
 一致SQLite备份：/var/lib/gpupm-trial/backup-manual-residual-1791969744993300585。三个服务active，allow_mutations=false保持；只通过设置API启用default_orphan_reminder=true/default_orphan_wait_seconds=300。已有任务名称/启动信息/优先级/保护/时限/到期策略/旧清理字段保持，缺少的新提醒字段补齐；部署后新发现任务按默认模板采集。演示环境仍为原2任务，浏览器测试独立fixture未进入试用数据库。
 
 Ubuntu197项后端测试、68项前端测试、最终13条Chrome E2E及构建/类型检查通过。两入口实机中英/术语/5分钟与开关/取消/active筛选/375px检查通过，全程无任务终止或任务配置写入。账号密码、目录与存储阈值保持。范围变化导致部分清理时需重新预览；不对真实GPU训练进行终止验收。
+
+## 任务监控程序白名单
+
+两入口已发布后端与JS index-C13Kd90C.js，CSS index-B4IT83SE.css保持。新增任务监控白名单，初始/usr/lib/xorg/Xorg、/usr/bin/Xorg；通过策略配置编辑精确完整程序路径，[]取消排除。已有可核验Xorg记录退出任务监控；账号活动及GPU总占用继续统计，程序不会被停止。其余任务的名称/时限/优先级/保护/提醒策略保持。
+
+一致SQLite备份：/var/lib/gpupm-trial/backup-executable-allowlist-1791973089903583844。三服务active，allow_mutations=false保持，无原生账号/进程写操作。实机Xorg PID4938、boot_id及start_ticks保持，真实任务API隐藏1记录，其余11任务保持；演示2任务保持。既有设置值不变，仅补缺省白名单；隐藏元数据、TaskConfig与审计保留。
+
+Ubuntu228项后端、70项前端、14条Chrome E2E及构建/类型检查通过。两入口中英文、术语、375px标签编辑/放弃/取消验证通过，界面检查不保存测试草稿、不发送任务终止。已结束且无exe证据的旧记录保留，不根据别名误判；后续其他桌面程序可追加完整路径，不自动猜测ML/DL类别。

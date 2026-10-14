@@ -4,6 +4,7 @@ from typing import Annotated, Literal
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator, model_validator
 
 from gpupm.domain.rules import validate_name
+from gpupm.domain.settings import validate_ignored_executables
 
 Priority = Annotated[int, Field(strict=True, ge=0, le=100)]
 
@@ -74,6 +75,13 @@ class Terminate(Input):
 
 
 class SettingsPatch(Input):
+    ignored_task_executables: list[str] = Field(default=None, strict=True, max_length=50)
+
+    @field_validator("ignored_task_executables", mode="before")
+    @classmethod
+    def executable_paths(cls, value):
+        return validate_ignored_executables(value)
+
     scan_interval_seconds: int | None = Field(default=None, ge=1, le=300)
     term_grace_seconds: int | None = Field(default=None, ge=1, le=120)
     default_max_runtime_seconds: int | None = Field(default=None, strict=True, gt=0, le=315360000)

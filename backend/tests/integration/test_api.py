@@ -568,3 +568,47 @@ def test_stale_awaiting_cleanup_task_detail_and_list_block_preview(client, app, 
     )
     assert response.status_code == 409
     assert response.json()["detail"]["code"] == "stale_snapshot"
+
+
+def test_executable_allowlist_hides_old_tasks_and_reverses(client, app):
+    import json
+    import sqlite3
+
+    headers = login(client)
+    assert client.get("/api/settings").json()["ignored_task_executables"] == [
+        "/usr/lib/xorg/Xorg",
+        "/usr/bin/Xorg",
+    ]
+    original = client.get("/api/tasks?scope=all").json()["items"]
+    hidden_id = original[0]["id"]
+    other_id = original[1]["id"]
+    with sqlite3.connect(app.state.config.agent_database) as db:
+        state = json.loads(db.execute("SELECT data FROM state WHERE id=1").fetchone()[0])
+        task = next(t for t in state["tasks"] if t["id"] == hidden_id)
+        for member in task["members"]:
+            member["exe"] = "/usr/lib/xorg/Xorg"
+        other = next(t for t in state["tasks"] if t["id"] == other_id)
+        other["members"][0]["exe"] = "/usr/bin/python"
+        other["members"][0]["command"] += " /usr/lib/xorg/Xorg"
+        expected_gpus = state["gpus"]
+        db.execute("UPDATE state SET data=? WHERE id=1", (json.dumps(state),))
+    app.state.ctx.invalidate()
+    listed = client.get("/api/tasks?scope=all").json()["items"]
+    assert [t["id"] for t in listed] == [other_id]
+    assert client.get(f"/api/tasks/{hidden_id}").status_code == 404
+    assert client.get("/api/overview").json()["task_count"] == 1
+    assert client.get("/api/gpus").json()["items"] == expected_gpus
+    assert (
+        client.patch("/api/settings", json={"ignored_task_executables": []}, headers=headers).status_code
+        == 200
+    )
+    assert {t["id"] for t in client.get("/api/tasks?scope=all").json()["items"]} == {hidden_id, other_id}
+    assert client.get(f"/api/tasks/{hidden_id}").status_code == 200
+    for invalid in [None, "/x", ["/x/*"], ["/x/../y"], [1]]:
+        assert (
+            client.patch(
+                "/api/settings", json={"ignored_task_executables": invalid}, headers=headers
+            ).status_code
+            == 422
+        )
+    assert client.get("/api/settings").json()["ignored_task_executables"] == []

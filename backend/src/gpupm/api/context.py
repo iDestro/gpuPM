@@ -8,6 +8,7 @@ from gpupm.db.models import AuditLog, ManagedUser, ManagementGroup, Setting, Tas
 from gpupm.db.session import columns
 from gpupm.domain.rules import deadline, parse_time, priority_key, utcnow
 from gpupm.errors import DomainError
+from gpupm.domain.settings import ignored_process
 
 
 class Context:
@@ -249,6 +250,12 @@ class Context:
             settings = self.settings()
             for original in snap["tasks"]:
                 task = dict(original)
+                members = original["members"]
+                task["members"] = [
+                    m for m in members if not ignored_process(m, settings["ignored_task_executables"])
+                ]
+                if task.get("ignored") or (members and not task["members"]):
+                    continue
                 task["is_human"] = bool(original.get("is_human", False))
                 user = users[task["uid"]]
                 group = groups[user.group_id]

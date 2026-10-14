@@ -1,4 +1,5 @@
 const terms: Record<string,string> = {
+  '忽略程序路径':'Exact executable-path allowlist',
   '残留提醒':'Residual process reminder',
   '残留等待时间':'Residual waiting duration',
   '默认残留提醒':'Default residual process reminder',

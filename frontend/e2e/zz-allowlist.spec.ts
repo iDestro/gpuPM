@@ -1,0 +1,30 @@
+import {test,expect} from '@playwright/test';
+import {login} from './auth';
+test('monitoring allowlist exact paths save, reload and clear without changing training task policies',async({page})=>{
+  await login(page);
+  const original=await(await page.request.get('/api/settings')).json();
+  const tasks=await(await page.request.get('/api/tasks?scope=all')).json();
+  await page.goto('/settings');
+  await expect(page.getByText('任务监控白名单',{exact:true})).toBeVisible();
+  await expect(page.getByText('/usr/lib/xorg/Xorg',{exact:true})).toBeVisible();
+  await page.getByRole('button',{name:'编辑策略',exact:true}).click();
+  const paths=page.getByLabel('忽略程序路径',{exact:true});
+  await paths.fill('/opt/desktop/Xwayland');await paths.press('Enter');
+  await page.getByRole('button',{name:/保\s*存/}).click();
+  await expect(page.getByRole('dialog')).toHaveCount(0);
+  expect((await(await page.request.get('/api/settings')).json()).ignored_task_executables).toEqual([...original.ignored_task_executables,'/opt/desktop/Xwayland']);
+  await page.reload();await expect(page.getByText('/opt/desktop/Xwayland',{exact:true})).toBeVisible();
+  await page.getByRole('button',{name:'编辑策略',exact:true}).click();
+  await page.setViewportSize({width:375,height:812});
+  await paths.scrollIntoViewIfNeeded();
+  await expect.poll(()=>page.evaluate(()=>document.documentElement.scrollWidth)).toBe(375);
+  await expect.poll(()=>page.getByRole('dialog').locator('.ant-modal-body').evaluate(el=>el.scrollWidth<=el.clientWidth)).toBe(true);
+  await expect(page.getByRole('dialog').getByRole('button',{name:'Close',exact:true})).toBeInViewport();
+  await paths.focus();for(let i=0;i<3;i++)await paths.press('Backspace');
+  await page.getByRole('button',{name:/保\s*存/}).click();await expect(page.getByRole('dialog')).toHaveCount(0);
+  expect((await(await page.request.get('/api/settings')).json()).ignored_task_executables).toEqual([]);
+  const me=await(await page.request.get('/api/auth/me')).json();
+  expect((await page.request.patch('/api/settings',{headers:{'X-CSRF-Token':me.csrf_token},data:{ignored_task_executables:original.ignored_task_executables}})).ok()).toBe(true);
+  const after=await(await page.request.get('/api/tasks?scope=all')).json();
+  for(const task of tasks.items){const same=after.items.find(t=>t.id===task.id);expect(same.members).toEqual(task.members);for(const field of ['name','priority','protected','max_runtime_seconds','orphan_reminder','orphan_wait_seconds'])expect(same[field]).toEqual(task[field]);}
+});

@@ -219,6 +219,7 @@ def test_collection_distinguishes_unreadable_from_exit(monkeypatch, failure, sta
             ppid=2,
             uids=SimpleNamespace(real=1000),
             cmdline=["python", "train.py"],
+            exe="/usr/bin/python",
             name="python",
             create_time=1,
             status="S",

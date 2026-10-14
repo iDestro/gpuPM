@@ -9,6 +9,7 @@ from uuid import uuid4
 import psutil
 
 from gpupm.domain.rules import utcnow, parse_time
+from gpupm.domain.settings import ignored_process
 
 
 def identity_key(identity):
@@ -116,7 +117,9 @@ def collect():
     except OSError as exc:
         errors.append(dict(code="procfs_unavailable", message=str(exc)))
         return gpus, processes, errors
-    for process in psutil.process_iter(["pid", "ppid", "uids", "cmdline", "name", "create_time", "status"]):
+    for process in psutil.process_iter(
+        ["pid", "ppid", "uids", "cmdline", "name", "create_time", "status", "exe"]
+    ):
         try:
             info = process.info
             identity = proc_identity(process.pid)
@@ -134,6 +137,7 @@ def collect():
                 username=username,
                 command=command,
                 argv=info["cmdline"] or [info["name"]],
+                exe=info["exe"],
                 create_time=datetime.fromtimestamp(info["create_time"], timezone.utc).isoformat(),
                 status=info["status"],
                 gpu_memory=usage.get(process.pid, {}),
@@ -157,30 +161,37 @@ def collect():
     return gpus, processes, errors
 
 
-def group_processes(processes, previous, excluded=()):
+def group_processes(processes, previous, excluded=(), ignored_executables=()):
+    ignored_by_key = {
+        identity_key(p["identity"]): p for p in processes if ignored_process(p, ignored_executables)
+    }
+    processes = [p for p in processes if identity_key(p["identity"]) not in ignored_by_key]
     by_pid = {p["pid"]: p for p in processes}
     by_key = {identity_key(p["identity"]): p for p in processes}
+    observed_keys = by_key.keys() | ignored_by_key.keys()
     assigned = set(excluded)
     owners = {
         key: task["id"]
         for task in previous
         for key in (
-            set(task.get("historic_identities", [])) | {identity_key(m["identity"]) for m in task["members"]}
+            set(task.get("historic_identities", []))
+            | {identity_key(m["identity"]) for m in task["members"] + task.get("ignored_members", [])}
         )
     }
     tasks = []
     for old in previous:
         task = dict(old)
+        old_members = old["members"] + old.get("ignored_members", [])
         task.setdefault(
             "original_name",
-            next((p["command"][:120] for p in old["members"] if p.get("gpu_memory")), None),
+            next((p["command"][:120] for p in old_members if p.get("gpu_memory")), None),
         )
-        old_pids = {p["pid"] for p in old["members"]}
+        old_pids = {p["pid"] for p in old_members}
         task.setdefault(
-            "leader_identities", [p["identity"] for p in old["members"] if p["ppid"] not in old_pids]
+            "leader_identities", [p["identity"] for p in old_members if p["ppid"] not in old_pids]
         )
         historic = set(old.get("historic_identities", [])) | {
-            identity_key(p["identity"]) for p in old["members"]
+            identity_key(p["identity"]) for p in old_members
         }
         members = [by_key[key] for key in historic if key in by_key and key not in assigned]
         frontier = {member["pid"] for member in members}
@@ -201,6 +212,14 @@ def group_processes(processes, previous, excluded=()):
             frontier = {p["pid"] for p in children}
             seen |= frontier
             historic.update(identity_key(p["identity"]) for p in children)
+        known_ignored = {
+            identity_key(p["identity"]): p
+            for p in old_members
+            if identity_key(p["identity"]) not in by_key and ignored_process(p, ignored_executables)
+        }
+        known_ignored.update({key: ignored_by_key[key] for key in historic if key in ignored_by_key})
+        task["ignored_members"] = list(known_ignored.values())
+        task["ignored"] = bool(known_ignored and not members)
         task["members"] = members
         task["historic_identities"] = sorted(historic)
         task["status"] = "running" if members else "finished"
@@ -280,12 +299,13 @@ def group_processes(processes, previous, excluded=()):
             )
         )
     for task in tasks:
+        task.setdefault("ignored", False)
         leaders = task.get("leader_identities", [])
-        task["leaders_present"] = any(identity_key(i) in by_key for i in leaders)
+        task["leaders_present"] = any(identity_key(i) in observed_keys for i in leaders)
         task["orphan_cleanup_due"] = bool(
             task["members"]
             and leaders
-            and not any(identity_key(i) in by_key for i in leaders)
+            and not any(identity_key(i) in observed_keys for i in leaders)
             and not any(m["gpu_memory"] for m in task["members"])
         )
         member_keys = {identity_key(m["identity"]) for m in task["members"]}
@@ -335,7 +355,9 @@ def group_processes(processes, previous, excluded=()):
     return tasks
 
 
-def signal_identity(identity, sig, protected_uids=(), *, expected_uid=None, human_check=None):
+def signal_identity(
+    identity, sig, protected_uids=(), *, expected_uid=None, human_check=None, ignored_executables=()
+):
     import signal
 
     if not hasattr(os, "pidfd_open") or not hasattr(signal, "pidfd_send_signal"):
@@ -362,6 +384,9 @@ def signal_identity(identity, sig, protected_uids=(), *, expected_uid=None, huma
             human_check is not None and not human_check(current_uid)
         ):
             return "scope_changed"
+        paths = ignored_executables() if callable(ignored_executables) else ignored_executables
+        if ignored_process({"exe": process.exe()}, paths):
+            return "ignored_executable"
         signal.pidfd_send_signal(fd, sig)
         return "signaled"
     except (ProcessLookupError, psutil.NoSuchProcess, FileNotFoundError):

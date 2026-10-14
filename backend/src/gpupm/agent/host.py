@@ -26,7 +26,12 @@ from gpupm.agent.processes import (
     valid_leader_identity,
 )
 from gpupm.domain.rules import deadline, parse_time, utcnow
-from gpupm.domain.settings import DEFAULT_SETTINGS, task_defaults
+from gpupm.domain.settings import (
+    DEFAULT_SETTINGS,
+    task_defaults,
+    validate_ignored_executables,
+    ignored_process,
+)
 from gpupm.errors import DomainError
 
 
@@ -35,6 +40,9 @@ class AgentService:
         self, config, collector=collect, executor=run, signaler=signal_identity, process_checker=process_state
     ):
         self.config = dict(config)
+        validate_ignored_executables(
+            config.get("ignored_task_executables", DEFAULT_SETTINGS["ignored_task_executables"])
+        )
         self.collector = collector
         self.signaler = signaler
         self.process_checker = process_checker
@@ -86,6 +94,11 @@ class AgentService:
         # Interrupted jobs never blindly replay a signal after a restart.
         with self.lock, self.database() as db:
             state = self.load(db)
+            state["settings"].setdefault(
+                "ignored_task_executables",
+                self.config.get("ignored_task_executables", DEFAULT_SETTINGS["ignored_task_executables"]),
+            )
+            validate_ignored_executables(state["settings"]["ignored_task_executables"])
             for task in state["tasks"]:
                 task["policy_status"] = "awaiting_sync"
             state["last_heartbeat"] = None
@@ -196,6 +209,18 @@ class AgentService:
                 task["status"] = "finalizing"
 
     def refresh(self, state):
+        for task in state["tasks"]:
+            members = task["members"]
+            removed = [
+                m for m in members if ignored_process(m, state["settings"]["ignored_task_executables"])
+            ]
+            if removed:
+                task["ignored_members"] = task.get("ignored_members", []) + removed
+                task["members"] = [m for m in members if m not in removed]
+                task["revision"] += 1
+                task["ignored"] = not task["members"]
+                if task["ignored"]:
+                    task.update(status="finished", overdue=False, anomalies=[])
         self.normalize_cleanup_status(state)
         try:
             gpus, processes, errors = self.collector()
@@ -216,7 +241,9 @@ class AgentService:
                 not valid_leader_identity(i) for t in state["tasks"] for i in t.get("leader_identities", [])
             ):
                 raise ValueError("invalid persisted leader identity")
-            state["tasks"] = group_processes(processes, state["tasks"], state["excluded"])
+            state["tasks"] = group_processes(
+                processes, state["tasks"], state["excluded"], state["settings"]["ignored_task_executables"]
+            )
         except (KeyError, TypeError, ValueError) as exc:
             state["errors"] = [dict(code="membership_collection_incomplete", message=str(exc))]
             state["stale"] = True
@@ -332,7 +359,7 @@ class AgentService:
 
     def targets(self, task, identity=None, residual_only=False):
         self.require_human_task(task)
-        if task["protected"] or task["status"] == "finished":
+        if task.get("ignored") or task["protected"] or task["status"] == "finished":
             raise DomainError("protected", "task protected or finished", 403)
         if residual_only and not residual_ready(task, utcnow()):
             raise DomainError("residual_not_ready", "residual cleanup conditions changed", 409)
@@ -409,6 +436,11 @@ class AgentService:
             )
         if method == "configure":
             settings = p.get("settings", {})
+            if "ignored_task_executables" in settings:
+                try:
+                    validate_ignored_executables(settings["ignored_task_executables"])
+                except ValueError as exc:
+                    raise DomainError("invalid_settings", str(exc), 422) from exc
             permitted = DEFAULT_SETTINGS.keys()
             if set(settings) - permitted:
                 raise DomainError("readonly_settings", "root config paths and mode are immutable", 403)
@@ -445,7 +477,16 @@ class AgentService:
                 raise DomainError(
                     "invalid_settings", "storage thresholds require 0 < warning < critical <= 100", 422
                 )
+            allowlist_changed = merged.get("ignored_task_executables") != state["settings"].get(
+                "ignored_task_executables"
+            )
             state["settings"].update(settings)
+            if allowlist_changed:
+                state["previews"] = {k: v for k, v in state["previews"].items() if v.get("kind") != "task"}
+                for task in state["tasks"]:
+                    task["revision"] += 1
+                    task["policy_status"] = "awaiting_sync"
+                self.refresh(state)
             self.settings_version += 1
             with self.interval_changed:
                 self.interval_changed.notify_all()
@@ -802,6 +843,13 @@ class AgentService:
         )
 
     def signal_member(self, member, sig):
+        def ignored_executables():
+            return self.runtime_setting(
+                "ignored_task_executables", DEFAULT_SETTINGS["ignored_task_executables"]
+            )
+
+        if ignored_process(member, ignored_executables()):
+            return "ignored_executable"
         protected = {self.config.get("api_uid")} - {None}
         if self.signaler is signal_identity:
             return self.signaler(
@@ -810,6 +858,7 @@ class AgentService:
                 protected,
                 expected_uid=member["uid"],
                 human_check=self.accounts.is_human,
+                ignored_executables=ignored_executables,
             )
         return self.signaler(member["identity"], sig, protected)
 

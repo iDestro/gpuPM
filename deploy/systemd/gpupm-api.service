@@ -1,0 +1,28 @@
+[Unit]
+Description=gpuPM administration API
+After=network.target gpupm-agent.service
+Wants=gpupm-agent.service
+
+[Service]
+Type=simple
+User=gpupm
+Group=gpupm
+WorkingDirectory=/opt/gpupm/current/backend
+Environment=GPUPM_MODE=host
+Environment=GPUPM_DATABASE=/var/lib/gpupm/api/app.db
+Environment=GPUPM_AGENT_SOCKET=/run/gpupm/agent.sock
+Environment=GPUPM_FRONTEND_DIST=/opt/gpupm/current/frontend/dist
+EnvironmentFile=-/etc/gpupm/api.env
+ExecStart=/opt/gpupm/current/backend/.venv/bin/gpupm serve --host 127.0.0.1 --port 8000
+Restart=on-failure
+RestartSec=3
+UMask=0077
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/var/lib/gpupm/api
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+
+[Install]
+WantedBy=multi-user.target

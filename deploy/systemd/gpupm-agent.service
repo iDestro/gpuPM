@@ -1,0 +1,22 @@
+[Unit]
+Description=gpuPM privileged host agent
+After=local-fs.target
+
+[Service]
+Type=simple
+User=root
+Group=root
+WorkingDirectory=/opt/gpupm/current/backend
+ExecStart=/opt/gpupm/current/backend/.venv/bin/python -m gpupm.agent.main --config /etc/gpupm/agent.json
+Restart=on-failure
+RestartSec=3
+RuntimeDirectory=gpupm
+RuntimeDirectoryMode=0755
+UMask=0077
+NoNewPrivileges=yes
+RestrictAddressFamilies=AF_UNIX
+# Host account, procfs, GPU, ACL and quota access are required.
+# Do not grant the API write access to this unit, the venv or agent config.
+
+[Install]
+WantedBy=multi-user.target

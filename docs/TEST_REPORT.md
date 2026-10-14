@@ -168,3 +168,11 @@ Ubuntu后端全量228项通过，Ruff通过。新增回归覆盖默认/旧配置
 18000/18001两个实机入口验证中英文、刷新、键盘、1440px桌面、1280×480短屏所有菜单可达、375px完整抽屉，折叠菜单无横向滚动；截图等待动画稳定后检查。PATCH/PUT/DELETE均0，策略配置前后相同。截图.runtime/preview/sidebar-collapsed-{zh,en}-{18000,18001}.png及sidebar-mobile-{18000,18001}.png。
 
 本轮只更新前端静态包，未重跑后端或未改动的组件单元测试；Safari/Firefox和真实手机未实测。浏览器禁止存储时折叠仍可用，跨刷新记忆不可用。
+
+## 侧栏图标语义与重复整理
+
+检查全部11个菜单，继续使用统一AntD线框图标。Linux账号单人/User、系统组多人/Team保留；业务优先级组改为OrderedList排序列表，用户业务策略改为Solution人物+文档。存储改Hdd硬盘，共享改ShareAlt共享连接，SSH登录记录改History历史时钟，操作审计改FileSearch文档检索；总览Dashboard、GPU任务Cluster进程组、设置Setting保留。11个图标不重复，名称/路由/分组/折叠逻辑未变。
+
+类型/构建及16条Chrome E2E通过。两个入口实机检查11个菜单及SVG类型各11个且唯一、中英图标提示、224/64px折叠和刷新、短屏菜单、375px完整手机抽屉；截屏确认显示效果。PATCH/PUT/DELETE均0，策略配置前后同值。截图沿用.runtime/preview/sidebar-collapsed-{zh,en}-{18000,18001}.png和sidebar-mobile-{18000,18001}.png，已更新为新图标。
+
+仅展示调整，无新增依赖或后端修改；未重跑后端/无关组件单测，Safari/Firefox未实测。

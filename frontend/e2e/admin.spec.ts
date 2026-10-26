@@ -4,8 +4,8 @@ test('administrator can navigate every live API screen without errors',async({pa
   const errors: string[]=[];
   page.on('pageerror',e=>errors.push(e.message));
   await login(page);
-  const pages=[['/tasks','GPU 任务'],['/groups','业务优先级组'],['/users','用户业务策略'],['/accounts','Linux 本地账号'],
-    ['/system-groups','Linux 权限组'],['/storage','存储与容量'],['/shares','团队共享目录'],['/login-events','SSH 登录记录'],['/settings','策略配置'],['/audit','操作审计']];
+  const pages=[['/tasks','GPU 任务'],['/groups','任务策略组'],['/users','本地账号'],['/accounts','本地账号'],
+    ['/system-groups','系统用户组'],['/storage','存储与容量'],['/shares','团队共享目录'],['/login-events','SSH 登录记录'],['/settings','策略配置'],['/audit','操作审计']];
   for(const [path,title] of pages){
     await page.goto(path);
     await expect(page.getByText(title,{exact:true}).last()).toBeVisible();
@@ -86,16 +86,18 @@ test('task policy edits persist and protected task cannot be terminated',async({
 test('soft deletion retains account and restoration leaves prior disable restriction',async({page})=>{
   await login(page);
   await page.goto('/accounts');
-  const alice=page.getByRole('row').filter({has:page.getByRole('button',{name:'alice',exact:true})});
+  const alice=page.getByRole('row').filter({has:page.getByRole('link',{name:'alice',exact:true})});
   await alice.getByRole('button',{name:/停\s*用/ }).click();
   await page.getByLabel('操作原因').fill('browser-disable');
   await page.getByRole('button',{name:'确认执行'}).click();
   await expect(page.getByText('请求已提交，以下为服务器返回结果')).toBeVisible();
+  await expect(page.locator('.ant-alert-error')).toHaveCount(0);
   await page.getByRole('button',{name:/关\s*闭/ }).click();
   await alice.getByRole('button',{name:'软删除'}).click();
   await page.getByLabel('操作原因').fill('browser-soft-delete');
   await page.getByRole('button',{name:'确认执行'}).click();
   await expect(page.getByText('请求已提交，以下为服务器返回结果')).toBeVisible();
+  await expect(page.locator('.ant-alert-error')).toHaveCount(0);
   await page.getByRole('button',{name:/关\s*闭/ }).click();
   await page.getByRole('combobox',{name:'账号状态'}).focus();
   await page.getByRole('combobox',{name:'账号状态'}).press('ArrowDown');
@@ -104,6 +106,7 @@ test('soft deletion retains account and restoration leaves prior disable restric
   await page.getByLabel('操作原因').fill('browser-restore');
   await page.getByRole('button',{name:'确认执行'}).click();
   await expect(page.getByText('请求已提交，以下为服务器返回结果')).toBeVisible();
+  await expect(page.locator('.ant-alert-error')).toHaveCount(0);
   const result=await page.request.get('/api/system-users?state=all');
   const account=(await result.json()).find((a:any)=>a.username==='alice');
   expect(account.status).toBe('disabled');
@@ -143,7 +146,7 @@ test('human defaults, readonly other rows and task list termination preview',asy
     await route.fulfill({response,json:rows.map((row:any)=>({...row,is_human:false}))});
   });
   await page.goto('/accounts');
-  const bob=page.getByRole('row').filter({has:page.getByRole('button',{name:'bob',exact:true})});
+  const bob=page.getByRole('row').filter({has:page.getByRole('link',{name:'bob',exact:true})});
   await expect(bob.getByRole('button',{name:/编\s*辑/})).toBeDisabled();
   await expect(bob.getByRole('button',{name:/停\s*用/})).toBeDisabled();
   await page.getByRole('combobox',{name:'账号范围'}).focus();

@@ -9,7 +9,9 @@ def describe_group(group, accounts, shares, private_names=()):
     primary = [a["username"] for a in accounts if a["gid"] == group["gid"]]
     private = any(a["gid"] == group["gid"] and a["username"] == group["name"] for a in accounts)
     kind = (
-        "platform"
+        "share_internal"
+        if group.get("share_owner")
+        else "platform"
         if group["name"] == "human"
         else "system"
         if group["gid"] < 1000 or group["name"] in SENSITIVE_GROUPS

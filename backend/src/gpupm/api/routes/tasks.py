@@ -70,7 +70,11 @@ def tasks(
     if group_id is not None:
         result = [t for t in result if t["group_id"] == group_id]
     if gpu:
-        result = [t for t in result if any(gpu in m.get("gpu_memory", {}) for m in t["members"])]
+        result = [
+            t
+            for t in result
+            if gpu in t.get("gpu_uuids", []) or any(gpu in m.get("gpu_memory", {}) for m in t["members"])
+        ]
     if status == "overdue":
         result = [t for t in result if t["overdue"]]
     elif status == "anomaly":
@@ -109,24 +113,40 @@ def update_task(ident: str, body: TaskPatch, request: Request):
         raise DomainError("invalid_value", "任务配置不能为空", 422)
     with ctx.lock:
         before = ctx.task(ident)
-        ctx.require_human(before["uid"])
+        ctx.require_policy_user(before["uid"])
         if before["revision"] != revision:
             raise DomainError("revision_conflict", "任务版本已改变")
+        with ctx.sessions() as db:
+            registered = db.get(TaskConfig, ident)
+            needs_enrollment = registered is None or not registered.policy_sources
+        if needs_enrollment:
+            ctx.heartbeat(expected_task=(ident, revision))
+            with ctx.sessions() as db:
+                registered = db.get(TaskConfig, ident)
+                if registered is None or registered.status != "applied":
+                    raise DomainError("policy_not_applied", "策略尚未同步，请重新加载", 409)
+                revision = registered.revision
+            before = ctx.task(ident)
+            if before["revision"] != revision:
+                raise DomainError("revision_conflict", "任务版本已改变", 409)
         with ctx.sessions.begin() as db:
             policy = db.get(TaskConfig, ident)
-            if policy is None:
-                policy = TaskConfig(task_id=ident, policy={}, revision=revision, status="pending")
-                db.add(policy)
+            if policy is None or policy.status != "applied":
+                raise DomainError("policy_not_applied", "策略尚未同步，请重新加载", 409)
             updated = dict(policy.policy, **changes)
-            policy.policy = updated
+            sources = dict(policy.policy_sources or {}, **{k: "task" for k in changes})
+            ranking = None if "priority" in changes else policy.priority_snapshot
             policy.status = "pending"
             ctx.audit(
                 db,
                 actor(request),
-                "task.policy",
+                "task.policy_attempt",
                 ident,
-                {k: before.get(k) for k in changes},
-                changes,
+                policy.policy,
+                {
+                    "revision": revision, "uid": before["uid"], "started_at": before["started_at"],
+                    "policy": updated, "sources": sources, "priority_snapshot": ranking,
+                },
                 "pending",
             )
         try:
@@ -138,9 +158,13 @@ def update_task(ident: str, body: TaskPatch, request: Request):
             with ctx.sessions.begin() as db:
                 db.get(TaskConfig, ident).status = "failed"
                 ctx.audit(db, actor(request), "task.policy", ident, None, None, "failed", exc.message)
+            ctx.invalidate()
             raise
         with ctx.sessions.begin() as db:
             policy = db.get(TaskConfig, ident)
+            policy.policy = updated
+            policy.policy_sources = sources
+            policy.priority_snapshot = ranking
             policy.status = "applied"
             policy.revision = applied["revision"]
             ctx.audit(db, actor(request), "task.policy", ident, None, updated, "succeeded")

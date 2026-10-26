@@ -31,11 +31,13 @@ test("unknown server errors retain the complete raw diagnostic", async () => {
   expect(error.message).toBe("作业 custom-name 在 /mnt/custom 已改变");
 });
 
-test("known errors translate without changing stored diagnostics", () => {
+test("known errors translate without changing stored diagnostics", async () => {
   act(() => setLocale("en-US"));
   const error = new ApiError(409, "revision_conflict", "任务版本已改变");
   render(<ErrorAlert error={error} />);
-  expect(screen.getByText("Task revision changed")).toBeInTheDocument();
+  expect(screen.getByText("The account or configuration revision changed. Refresh and preview again.")).toBeInTheDocument();
+  await userEvent.click(screen.getByText("Server diagnostic"));
+  expect(screen.getByText("任务版本已改变")).toBeVisible();
   expect(error.message).toBe("任务版本已改变");
 });
 

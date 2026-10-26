@@ -5,7 +5,7 @@ from pydantic import ValidationError
 
 from gpupm.agent.host import AgentService
 from gpupm.domain.schemas import SettingsPatch, TaskPatch
-from test_host_agent import process
+from test_host_agent import process, managed_task_accounts
 
 
 def test_residual_lifecycle_and_legacy_never_signals(tmp_path, monkeypatch):
@@ -20,7 +20,7 @@ def test_residual_lifecycle_and_legacy_never_signals(tmp_path, monkeypatch):
         signaler=lambda *a: signals.append(a),
     )
     service.accounts.is_human = lambda uid: True
-    service.accounts.list = lambda state: []
+    service.accounts.list = managed_task_accounts
     task = service.call("snapshot")["tasks"][0]
     service.call(
         "apply_task_policy",
@@ -89,7 +89,7 @@ def ready_service(tmp_path, monkeypatch):
         process_checker=lambda i: "alive",
     )
     service.accounts.is_human = lambda uid: True
-    service.accounts.list = lambda state: []
+    service.accounts.list = managed_task_accounts
     service.call("snapshot")
     members[:] = [process(11, 1), process(12, 1)]
     service.call("snapshot")
@@ -298,6 +298,7 @@ def test_queued_deadline_cannot_signal_after_leader_exit(tmp_path, monkeypatch):
         collector=lambda: ([], members, []),
     )
     service.accounts.is_human = lambda uid: True
+    service.accounts.list = managed_task_accounts
     monkeypatch.setattr("gpupm.agent.host.threading.Thread.start", lambda self: None)
     task = service.call("snapshot")["tasks"][0]
     task = service.call(
@@ -362,6 +363,7 @@ def test_inactive_cleanup_job_stale_collection_leaves_finalizing(tmp_path, monke
     if restart:
         service = AgentService(service.config, collector=failed_collect, process_checker=lambda i: "alive")
         service.accounts.is_human = lambda uid: True
+        service.accounts.list = managed_task_accounts
     else:
         with service.database() as db:
             state = service.load(db)

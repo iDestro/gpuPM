@@ -62,7 +62,7 @@ test('mobile navigation remains accessible and wide tables scroll inside content
     }
     expect(await page.evaluate(()=>document.documentElement.scrollWidth)).toBeLessThanOrEqual(375);
   }
-  const account=page.getByRole('button',{name:'alice',exact:true});
+  const account=page.getByRole('link',{name:'alice',exact:true});
   await expect(account).toBeInViewport();
   expect(await page.locator('td.ant-table-cell-fix-right').first().evaluate(node=>getComputedStyle(node).position)).toBe('static');
 
@@ -119,4 +119,27 @@ test('sidebar preference safely falls back and toggles when browser storage is b
   const navigation=sidebar.getByRole('navigation');await navigation.evaluate(el=>{el.scrollTop=el.scrollHeight;});await expect(navigation.getByRole('menuitem',{name:'策略配置',exact:true})).toBeInViewport();
   const scroll=await navigation.evaluate(el=>el.scrollTop);await page.locator('.content-scroll').evaluate(el=>{el.scrollTop=el.scrollHeight;});expect(await navigation.evaluate(el=>el.scrollTop)).toBe(scroll);
   await page.getByRole('button',{name:'展开侧栏',exact:true}).click();await expect.poll(async()=>Math.round((await sidebar.boundingBox())!.width)).toBe(224);expect(errors).toEqual([]);
+});
+
+test('account management supports deep links, refresh, locales and narrow layouts',async({page})=>{
+ await login(page);
+ await page.goto('/accounts');
+ await page.getByRole('link',{name:'alice',exact:true}).click();
+ await expect(page).toHaveURL(/\/accounts\/demo-alice$/);
+ await expect(page.getByRole('heading',{name:'alice',exact:true})).toBeVisible();
+ await expect(page.getByRole('menuitem',{name:'本地账号'})).toHaveClass(/ant-menu-item-selected/);
+ await expect(page.getByText('/home/alice',{exact:true})).toBeVisible();
+ await expect(page.getByRole('button',{name:'创建账号'})).toHaveCount(0);
+ await page.reload();
+ await expect(page.getByRole('heading',{name:'alice',exact:true})).toBeVisible();
+ await page.screenshot({path:'test-results/account-management-desktop.png',fullPage:true});
+ await page.locator('.language-select').click();await page.getByText('English',{exact:true}).last().click();
+ await expect(page.getByText('Permissions and directories',{exact:true})).toBeVisible();
+ await page.getByRole('heading',{name:'alice',exact:true}).click();
+ await page.setViewportSize({width:375,height:812});
+ await expect(page.getByRole('link',{name:'Back to accounts'})).toBeVisible();
+ await expect.poll(()=>page.evaluate(()=>document.documentElement.scrollWidth)).toBeLessThanOrEqual(375);
+ await page.screenshot({path:'test-results/account-management-mobile.png',fullPage:true});
+ await page.getByRole('link',{name:'Back to accounts'}).click();
+ await expect(page).toHaveURL(/\/accounts$/);
 });

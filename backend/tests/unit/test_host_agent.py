@@ -9,6 +9,12 @@ from gpupm.agent.protocol import read_frame, write_frame, MAX_FRAME
 from gpupm.errors import DomainError
 
 
+def managed_task_accounts(state):
+    state["accounts"].setdefault("1000", {})
+    return [dict(uid=1000, username="alice", id="1000", is_human=True,
+                 managed=True, protected=False, status="active")]
+
+
 def process(pid, ppid, gpu=False, command="python train.py", uid=1000):
     return dict(
         identity=dict(boot_id="boot", pid=pid, start_ticks=pid * 10),
@@ -97,17 +103,6 @@ def test_sensitive_group_grants_and_keys_are_validated():
         validate_keys(["ssh-ed25519 broken"])
 
 
-def test_quota_units_and_native_readback():
-    from gpupm.agent.storage import quota_blocks, validate_quota
-
-    assert quota_blocks(1025) == 2
-    assert quota_blocks(0) == 0
-    with pytest.raises(DomainError):
-        validate_quota({"soft_bytes": 4096, "hard_bytes": 1024})
-    with pytest.raises(DomainError):
-        validate_quota({"soft_inodes": -1})
-    with pytest.raises(DomainError):
-        validate_quota({"hard_bytes": True})
 
 
 def test_directory_stats_never_follow_links(tmp_path):
@@ -118,8 +113,8 @@ def test_directory_stats_never_follow_links(tmp_path):
     (folder / "file").write_bytes(b"1234")
     (folder / "outside").symlink_to("/etc")
     result = directory_usage(folder)
-    assert result["bytes"] == 4
-    assert result["files"] == 2
+    assert result["bytes"] == sum(p.lstat().st_blocks * 512 for p in (folder, folder / "file", folder / "outside"))
+    assert result["status"] == "available"
 
 
 def test_auth_parser_only_accepts_genuine_numeric_ip():
@@ -187,6 +182,7 @@ def test_preview_cannot_be_submitted_for_different_task(tmp_path):
         collector=lambda: ([], [process(2, 1, True), process(3, 1, True)], []),
     )
     service.accounts.is_human = lambda uid: uid == 1000
+    service.accounts.list = managed_task_accounts
     snapshot = service.call("snapshot")
     tasks = snapshot["tasks"]
     service.call(
@@ -316,6 +312,7 @@ def test_policy_restart_requires_new_heartbeat(tmp_path):
 
     service = AgentService(config, collector=collector)
     service.accounts.is_human = lambda uid: uid == 1000
+    service.accounts.list = managed_task_accounts
     task = service.call("snapshot")["tasks"][0]
     task = service.call(
         "apply_task_policy",
@@ -340,32 +337,6 @@ def test_malformed_ssh_wire_key_is_rejected():
         validate_keys(["ssh-ed25519 " + base64.b64encode(blob).decode()])
 
 
-def test_quota_native_struct_uses_full_width_and_kib_units(monkeypatch):
-    import ctypes
-    import gpupm.agent.storage as module
-
-    seen = []
-
-    class Lib:
-        def __init__(self):
-            def quotactl(command, device, uid, pointer):
-                data = ctypes.cast(pointer, ctypes.POINTER(module.Dqblk)).contents
-                if command.value & 0xFFFFFFFF == 0x80000800:
-                    seen.append((data.bhardlimit, data.ihardlimit, data.valid))
-                    return 0
-                data.bhardlimit = 2**40
-                data.ihardlimit = 2**40
-                data.curspace = 1234
-                return 0
-
-            self.quotactl = quotactl
-
-    monkeypatch.setattr(module.ctypes, "CDLL", lambda *args, **kwargs: Lib())
-    result = module.native_quota(
-        "/dev/fake", 1000, {"filesystem_id": "/data", "hard_bytes": 2**50, "hard_inodes": 2**40}
-    )
-    assert seen == [(2**40, 2**40, 5)]
-    assert result["hard_bytes"] == 2**50 and result["hard_inodes"] == 2**40 and result["used_bytes"] == 1234
 
 
 def test_incomplete_collection_blocks_signal_preview(tmp_path):
@@ -487,6 +458,7 @@ def test_empty_initial_policy_registration_is_confirmed_only_by_agent(tmp_path):
         {"store_path": str(tmp_path / "agent.sqlite")}, collector=lambda: ([], [process(10, 1, True)], [])
     )
     service.accounts.is_human = lambda uid: uid == 1000
+    service.accounts.list = managed_task_accounts
     task = service.call("snapshot")["tasks"][0]
     service.call("heartbeat", {"policy_versions": {task["id"]: task["revision"]}})
     assert service.call("snapshot")["tasks"][0]["policy_status"] == "awaiting_sync"
@@ -515,7 +487,7 @@ def test_legacy_cleanup_tick_never_creates_job(tmp_path):
         signaler=lambda identity, sig, uids: "exited",
     )
     service.accounts.is_human = lambda uid: uid == 1000
-    service.accounts.list = lambda state: []
+    service.accounts.list = managed_task_accounts
     task = service.call("snapshot")["tasks"][0]
     service.call(
         "apply_task_policy",
@@ -546,6 +518,7 @@ def test_job_records_residual_process_instead_of_signal_success(tmp_path):
         process_checker=lambda identity: "alive",
     )
     service.accounts.is_human = lambda uid: uid == 1000
+    service.accounts.list = managed_task_accounts
     task = service.call("snapshot")["tasks"][0]
     preview = service.call("preview_termination", {"task_id": task["id"]})
     job = service.call(
@@ -581,7 +554,7 @@ def test_restart_rechecks_interrupted_targets_without_replaying_signals(tmp_path
     assert job["status"] == "interrupted" and job["results"][-1]["status"] == "alive"
 
 
-def test_storage_alerts_include_capacity_inode_quota_and_share():
+def test_storage_alerts_include_capacity_inode_and_share():
     from gpupm.agent.storage import storage_alerts
 
     fs = [dict(id="/data", path="/data", total=1000, available=50, total_inodes=100, available_inodes=15)]
@@ -597,23 +570,12 @@ def test_storage_alerts_include_capacity_inode_quota_and_share():
             data_filesystem_id="/data",
         )
     ]
-    quotas = [
-        dict(
-            account_id="1000",
-            filesystem_id="/data",
-            status="applied",
-            used_bytes=95,
-            hard_bytes=100,
-            used_inodes=9,
-            hard_inodes=10,
-        )
-    ]
     shares = [dict(id="shared", name="project", path="/data/shared/project", usage_bytes=950, usage_files=10)]
-    alerts = storage_alerts(fs, users, shares, quotas, 80, 90)
-    assert {a["scope"] for a in alerts} == {"filesystem", "user_directory", "user_quota", "share"}
+    alerts = storage_alerts(fs, users, shares, 80, 90)
+    assert {a["scope"] for a in alerts} == {"filesystem", "user_directory", "share"}
     assert any(a["metric"] == "inodes" and a["severity"] == "warning" for a in alerts)
     assert any(a["metric"] == "bytes" and a["severity"] == "critical" for a in alerts)
-    assert storage_alerts([dict(id="/data", path="/data", total=0, available=0)], [], [], [], 80, 90) == []
+    assert storage_alerts([dict(id="/data", path="/data", total=0, available=0)], [], [], 80, 90) == []
 
 
 def test_storage_alert_log_records_only_transitions(tmp_path, monkeypatch):
@@ -908,7 +870,7 @@ def test_storage_walk_does_not_hold_authority_lock(tmp_path, monkeypatch):
 
     monkeypatch.setattr(module, "directory_usage", usage)
     monkeypatch.setattr(module, "filesystems", lambda: [])
-    scanner = threading.Thread(target=service.collect_storage)
+    scanner = threading.Thread(target=lambda: service.collect_storage(scan_directories=True))
     scanner.start()
     assert entered.wait(1)
 
@@ -1046,7 +1008,7 @@ def test_new_policy_requires_its_own_persisted_revision_heartbeat(tmp_path):
         process_checker=lambda identity: "exited",
     )
     service.accounts.is_human = lambda uid: uid == 1000
-    service.accounts.list = lambda state: []
+    service.accounts.list = managed_task_accounts
     task = service.call("snapshot")["tasks"][0]
     old = service.call(
         "apply_task_policy", {"task_id": task["id"], "revision": task["revision"], "policy": {}}
@@ -1471,6 +1433,7 @@ def test_nonhuman_expiry_and_account_tick_are_skipped(tmp_path):
         signaler=lambda *args: pytest.fail("must not signal nonhuman"),
     )
     service.accounts.is_human = lambda uid: uid == 1000
+    service.accounts.list = managed_task_accounts
     task = service.call("snapshot")["tasks"][0]
     task = service.call(
         "apply_task_policy",
@@ -1509,3 +1472,187 @@ def test_task_original_name_survives_alias_refresh_and_finish():
     assert group_processes([], tasks)[0]["original_name"] == "python train.py"
     tasks[0]["members"] = []
     assert group_processes([], tasks)[0]["original_name"] is None
+
+
+def test_create_account_keeps_provisioning_lock_until_login_policy_verified(tmp_path, monkeypatch):
+    import os
+    from types import SimpleNamespace
+    import gpupm.agent.accounts as module
+
+    home = tmp_path / "home"
+    data = tmp_path / "data"
+    home.mkdir()
+    data.mkdir()
+    native = dict(password="!hash", shell="/usr/sbin/nologin", expire="1", last_change="100", restricted=True)
+    created = False
+    calls = []
+
+    def lookup(name):
+        if not created:
+            raise KeyError(name)
+        return SimpleNamespace(
+            pw_uid=os.getuid(),
+            pw_gid=os.getgid(),
+            pw_name=name,
+            pw_dir=str(home / name),
+            pw_gecos=next(c[c.index("--comment") + 1] for c in calls if c[0] == "useradd"),
+        )
+
+    def run(argv, **kwargs):
+        nonlocal created
+        calls.append(argv)
+        if argv[0] == "useradd":
+            created = True
+        if argv[0] == "chpasswd":
+            native["password"] = "hash"
+        if "--lock" in argv:
+            native["password"] = "!" + native["password"].lstrip("!")
+        if "--unlock" in argv:
+            native["password"] = native["password"].removeprefix("!")
+        if "--password" in argv:
+            native["password"] = argv[argv.index("--password") + 1]
+        if "--shell" in argv:
+            native["shell"] = argv[argv.index("--shell") + 1]
+        if "--expiredate" in argv:
+            value = argv[argv.index("--expiredate") + 1]
+            native["expire"] = "" if value == "-1" else value
+        return ""
+
+    monkeypatch.setattr(
+        module,
+        "rename_noreplace",
+        lambda srcfd, src, dstfd, dst: os.rename(src, dst, src_dir_fd=srcfd, dst_dir_fd=dstfd),
+    )
+    monkeypatch.setattr(module.pwd, "getpwnam", lookup)
+    monkeypatch.setattr(module, "quality_password", lambda *args: None)
+    monkeypatch.setattr(module, "secure_directory", lambda path: module.Path(path))
+    accounts = module.Accounts({"home_base": str(home), "data_base": str(data)}, run)
+    accounts.local_entries = lambda: []
+    accounts.observe_identities = lambda *args: None
+    accounts.ensure_human_group = lambda: None
+    accounts.groups = lambda state: []
+    accounts.write_files = lambda *args, **kwargs: None
+    accounts.shadow_baseline = lambda name: dict(native)
+    accounts.find = lambda state, ident: state["accounts"][ident]
+    state = {"accounts": {}, "groups": {}}
+    result = accounts.execute(
+        state,
+        "create",
+        None,
+        {
+            "username": "newuser",
+            "password": "Strong-password-123",
+            "shell": "/bin/bash",
+            "groups": [],
+            "require_password_change": True,
+        },
+    )
+    assert native["shell"] == "/bin/bash"
+    assert native["password"] == "hash" and native["expire"] == ""
+    assert result["managed"] and result["login_policy_status"] == "applied"
+    assert result["agent_restricted"] is False
+    assert result["require_password_change"] is True
+    # Release shell and account expiry together only after validating the temporary lock.
+    releases = [c for c in calls if "--shell" in c and "/bin/bash" in c]
+    assert len(releases) == 1 and "--expiredate" in releases[0]
+
+
+def test_gpu_association_survives_release_exit_and_legacy_task_upgrade():
+    first = group_processes([process(10, 1, True)], [])[0]
+    assert first['gpu_uuids'] == ['gpu']
+    # An older stored task can recover its GPU before its last member disappears.
+    first.pop('gpu_uuids')
+    released = group_processes([process(10, 1)], [first])[0]
+    assert released['gpu_uuids'] == ['gpu']
+    ended = group_processes([], [released])[0]
+    assert ended['status'] == 'finished'
+    assert ended['members'] == []
+    assert ended['gpu_uuids'] == ['gpu']
+    assert group_processes([], [ended])[0]['gpu_uuids'] == ['gpu']
+
+
+def test_service_leader_under_pid_one_is_terminated_by_confirmed_deadline(tmp_path, monkeypatch):
+    from datetime import datetime, timedelta, timezone
+    import signal
+
+    now = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    monkeypatch.setattr('gpupm.agent.host.utcnow', lambda: now)
+    members = [process(20, 1, True)]
+    signals = []
+
+    def send(identity, sig, uids):
+        signals.append((identity, sig))
+        members.clear()
+        return 'signaled'
+
+    service = AgentService(
+        dict(store_path=str(tmp_path / 'deadline.sqlite'), allow_mutations=True,
+             term_grace_seconds=0, termination_recheck_seconds=0),
+        collector=lambda: ([], members, []), signaler=send,
+        process_checker=lambda identity: 'exited',
+    )
+    service.accounts.is_human = lambda uid: uid == 1000
+    service.accounts.list = managed_task_accounts
+    task = service.call('snapshot')['tasks'][0]
+    assert 'orphan' not in task['anomalies']
+    task = service.call('apply_task_policy', dict(task_id=task['id'], revision=task['revision'],
+                        policy=dict(max_runtime_seconds=300, deadline_action='terminate')))
+    now += timedelta(seconds=301)
+    service.call('heartbeat', dict(policy_versions={task['id']: task['revision']}))
+    service.tick()
+    for worker in list(service.workers.values()):
+        worker.join(timeout=3)
+    assert signals == [(process(20, 1, True)['identity'], signal.SIGTERM)]
+    with service.database() as db:
+        jobs = service.load(db)['jobs']
+    assert len(jobs) == 1
+    assert next(iter(jobs.values()))['targets'][0]['pid'] == 20
+    assert next(iter(jobs.values()))['status'] == 'completed'
+
+
+def test_finished_host_task_clock_freezes_after_collection(tmp_path, monkeypatch):
+    from datetime import datetime, timedelta, timezone
+
+    now = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    monkeypatch.setattr('gpupm.agent.host.utcnow', lambda: now)
+    members = [process(20, 1, True)]
+    service = AgentService(dict(store_path=str(tmp_path / 'clock.sqlite')),
+                           collector=lambda: ([], members, []))
+    service.accounts.is_human = lambda uid: True
+    service.call('snapshot')
+    now += timedelta(seconds=300)
+    members.clear()
+    ended = service.call('snapshot')['tasks'][0]
+    assert ended['finished_at'] == now.isoformat()
+    assert ended['runtime_seconds'] == 300
+    assert ended['remaining_seconds'] is None
+    now += timedelta(hours=1)
+    later = service.call('snapshot')['tasks'][0]
+    assert later['runtime_seconds'] == 300
+    assert later['finished_at'] == ended['finished_at']
+    assert not later['overdue']
+
+
+def test_pid_one_exception_only_applies_to_the_confirmed_leader(tmp_path):
+    service = AgentService(dict(store_path=str(tmp_path / 'targets.sqlite')),
+                           collector=lambda: ([], [process(20, 1, True)], []))
+    service.accounts.is_human = lambda uid: uid == 1000
+    service.accounts.list = managed_task_accounts
+    task = service.call('snapshot')['tasks'][0]
+    task['members'].append(process(21, 1))
+    targets, excluded = service.targets(task)
+    assert [m['pid'] for m in targets] == [20]
+    assert excluded == [dict(identity=process(21, 1)['identity'], reason='orphan cleanup not authorized')]
+
+
+def test_root_task_policy_cannot_bypass_account_protection(tmp_path):
+    service = AgentService(dict(store_path=str(tmp_path / 'guard.db')), collector=lambda: ([], [process(500, 400, True)], []))
+    service.accounts.is_human = lambda uid: True
+    service.accounts.list = lambda state: [dict(uid=1000, username='alice', id='1000', is_human=True, managed=True, protected=True, status='active')]
+    task = service.call('snapshot')['tasks'][0]
+    with pytest.raises(DomainError) as error:
+        service.call('apply_task_policy', dict(task_id=task['id'], revision=task['revision'], policy={'protected': False, 'deadline_action': 'terminate', 'max_runtime_seconds': 1}))
+    assert error.value.code == 'policy_readonly'
+    after = service.call('snapshot')['tasks'][0]
+    assert after['revision'] == task['revision']
+    assert after['max_runtime_seconds'] == task['max_runtime_seconds']

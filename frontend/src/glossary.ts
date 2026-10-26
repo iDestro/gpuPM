@@ -1,5 +1,8 @@
 const terms: Record<string,string> = {
-  'Linux 权限组':'Linux permission groups',
+  '任务策略组':'Task policy group',
+  '继承策略配置':'Global policy inheritance',
+  '任务保护':'Task protection',
+  '权限组':'Permission groups',
   '普通权限组':'Managed regular Linux group for file and project access',
   '私有主组':'Account-bound private primary group; retained throughout account lifecycle',
   '人员分类组':'Personnel classification only; grants no project access',

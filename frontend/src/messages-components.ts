@@ -79,6 +79,7 @@ export const componentMessages: Record<string, string> = {
   "确认终止": "Confirm termination",
   "确认执行": "Confirm execution",
   "预览已过期，请关闭后重新预览": "Preview expired. Close this dialog and preview again.",
+  "预览已过期，请重新预览后再确认。": "Preview expired. Refresh the preview before confirming.",
   "范围由服务器核验。预览有效期：": "Scope verified by the server. Preview expires: ",
   "命令": "Command",
   "身份": "Identity",
@@ -130,5 +131,4 @@ export const componentMessages: Record<string, string> = {
   "账号已存在，包括软删除账号": "Account already exists, including soft deleted accounts",
   "先恢复已删除账号": "Restore the deleted account first",
   "存在活动进程，不能在线改名": "Active processes prevent renaming the account",
-  "文件系统不支持配额": "Filesystem does not support quotas"
 };

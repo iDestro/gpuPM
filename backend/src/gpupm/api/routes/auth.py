@@ -18,6 +18,13 @@ def health(request: Request):
         "status": "ok" if agent.get("status") == "ok" else "degraded",
         "mode": ctx.config.mode,
         "agent": agent.get("status"),
+        "mutations": agent.get("status") == "ok" and agent.get("mutations") is True,
+        "root_readiness": {
+            "ready": agent.get("status") == "ok" and agent.get("root_readiness", {}).get("ready") is True,
+            "error_code": agent.get("root_readiness", {}).get("error_code")
+            if agent.get("root_readiness")
+            else ("agent_unavailable" if agent.get("status") != "ok" else "capability_unavailable"),
+        },
     }
 
 

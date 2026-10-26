@@ -39,7 +39,7 @@ def test_parallel_audit_import_is_duplicate_safe(tmp_path):
     with ThreadPoolExecutor(max_workers=8) as workers:
         list(workers.map(lambda _: ctx.synchronize_events(), range(8)))
     with sessions() as db:
-        assert db.scalar(select(func.count()).select_from(AuditLog)) == 1
+        assert db.scalar(select(func.count()).select_from(AuditLog).where(AuditLog.event_id == "event1")) == 1
 
 
 def test_heartbeat_registers_new_and_reconfirms_membership_revision(tmp_path):
@@ -53,7 +53,7 @@ def test_heartbeat_registers_new_and_reconfirms_membership_revision(tmp_path):
             if method == "snapshot":
                 return {
                     "tasks": [
-                        {"id": "task1", "revision": self.revision, "status": "running", "is_human": True}
+                        {"id": "task1", "revision": self.revision, "status": "running", "is_human": True, "uid": 1001, "username": "alice", "started_at": "2020-01-01T00:00:00+00:00"}
                     ],
                     "collected_at": __import__("datetime")
                     .datetime.now(__import__("datetime").timezone.utc)
@@ -61,7 +61,7 @@ def test_heartbeat_registers_new_and_reconfirms_membership_revision(tmp_path):
                 }
             if method == "apply_task_policy":
                 assert params["revision"] == self.revision
-                assert params["policy"] == {}
+                assert params["policy"]["max_runtime_seconds"] == 1800
                 self.revision += 1
                 return {"revision": self.revision}
             if method == "heartbeat":
@@ -156,7 +156,7 @@ def test_heartbeat_does_not_register_other_task_policy(tmp_path):
         def call(self, method, params):
             if method == "snapshot":
                 return {
-                    "tasks": [{"id": "other", "revision": 1, "status": "running", "is_human": False}],
+                    "tasks": [{"id": "other", "revision": 1, "status": "running", "is_human": False, "uid": 99, "username": "system"}],
                     "collected_at": utcnow().isoformat(),
                 }
             if method == "apply_task_policy":

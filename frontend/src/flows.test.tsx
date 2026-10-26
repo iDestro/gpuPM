@@ -37,8 +37,7 @@ test("termination requires server preview then a reason; it uses the preview tok
     .mockImplementation(
       async (url: string) =>
         new Response(
-          JSON.stringify(
-            url.endsWith("termination-preview")
+          JSON.stringify(url === '/api/health' ? {mutations:true,mode:'demo'} : url.endsWith("termination-preview")
               ? {
                   token: "preview-token",
                   expires_at: "2099-01-01T00:00:00Z",
@@ -59,7 +58,7 @@ test("termination requires server preview then a reason; it uses the preview tok
     </QueryClientProvider>,
   );
   await screen.findByText("python train.py");
-  expect(fetch).toHaveBeenCalledTimes(1);
+  expect(vi.mocked(fetch).mock.calls.filter(([url]) => String(url).endsWith("termination-preview"))).toHaveLength(1);
   expect(screen.getByRole("button", { name: "确认终止" })).toBeDisabled();
   await userEvent.type(screen.getByLabelText("终止原因"), "管理员处理超时");
   await userEvent.click(screen.getByRole("button", { name: "确认终止" }));
@@ -68,7 +67,7 @@ test("termination requires server preview then a reason; it uses the preview tok
       fetch.mock.calls.filter((c) => String(c[0]).endsWith("/terminate")),
     ).toHaveLength(1),
   );
-  const payload = JSON.parse(fetch.mock.calls[1][1].body);
+  const payload = JSON.parse(fetch.mock.calls.find(([url]) => url.endsWith("/terminate"))![1].body);
   expect(payload).toMatchObject({
     token: "preview-token",
     reason: "管理员处理超时",
@@ -102,8 +101,7 @@ test("server preview error prevents termination and remains visible", async () =
     "fetch",
     vi
       .fn()
-      .mockResolvedValue(
-        new Response(
+      .mockImplementation(async (url:string) => url === "/api/health" ? new Response(JSON.stringify({mutations:true})) : new Response(
           JSON.stringify({
             detail: { code: "protected", message: "任务保护已开启" },
           }),
@@ -119,7 +117,7 @@ test("server preview error prevents termination and remains visible", async () =
   await screen.findByText("任务保护已开启");
   await userEvent.type(screen.getByLabelText("终止原因"), "test");
   expect(screen.getByRole("button", { name: "确认终止" })).toBeDisabled();
-  expect(fetch).toHaveBeenCalledTimes(1);
+  expect(vi.mocked(fetch).mock.calls.filter(([url]) => String(url).endsWith("termination-preview"))).toHaveLength(1);
 });
 
 test("account soft deletion submits preview token and revision without inventing an operation job", async () => {
@@ -128,8 +126,7 @@ test("account soft deletion submits preview token and revision without inventing
     .mockImplementation(
       async (url: string) =>
         new Response(
-          JSON.stringify(
-            url.endsWith("change-preview")
+          JSON.stringify(url === '/api/health' ? {mutations:true,mode:'demo'} : url.endsWith("change-preview")
               ? {
                   token: "account-scope",
                   expires_at: "2099-01-01T00:00:00Z",
@@ -157,8 +154,9 @@ test("account soft deletion submits preview token and revision without inventing
   await userEvent.type(screen.getByLabelText("操作原因"), "离职账号");
   await userEvent.click(screen.getByRole("button", { name: "确认执行" }));
   await screen.findByText("请求已提交，以下为服务器返回结果");
-  expect(fetch.mock.calls[1][1]).toMatchObject({ method: "DELETE" });
-  expect(JSON.parse(fetch.mock.calls[1][1].body)).toEqual({
+  const execution = fetch.mock.calls.find(([url]) => url === "/api/system-users/alice")!;
+  expect(execution[1]).toMatchObject({ method: "DELETE" });
+  expect(JSON.parse(execution[1].body)).toEqual({
     token: "account-scope",
     revision: 7,
     reason: "离职账号",
@@ -225,4 +223,11 @@ test.each([0,315360060])("invalid runtime %s prevents saving", async (initial) =
   await userEvent.click(screen.getByRole("button",{name:/保\s*存/}));
   await screen.findByText("运行时间需为1秒至87600小时；不限时请清空");
   expect(save).not.toHaveBeenCalled();
+});
+test('edit save in flight blocks all modal dismissal until the result arrives',async()=>{
+ let reject!:(reason:Error)=>void;const close=vi.fn();
+ render(<EditDialog title="编辑任务" fields={[{name:'name',label:'名称'}]} initial={{name:'saved'}} onClose={close} onSave={()=>new Promise((_,fail)=>{reject=fail;})}/>);
+ await userEvent.click(screen.getByRole('button',{name:/保\s*存/}));
+ expect(screen.getByRole('button',{name:/取\s*消/})).toBeDisabled();expect(screen.queryByRole('button',{name:'Close'})).toBeNull();await userEvent.keyboard('{Escape}');expect(close).not.toHaveBeenCalled();
+ reject(new Error('save failed'));await screen.findByText('save failed');expect(screen.getByRole('textbox',{name:'名称'})).toHaveValue('saved');expect(screen.getByRole('button',{name:/取\s*消/})).toBeEnabled();expect(close).not.toHaveBeenCalled();
 });

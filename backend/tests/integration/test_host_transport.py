@@ -20,7 +20,12 @@ def test_real_peer_socket_and_read_only_dispatch(tmp_path):
     try:
         worker.start()
         write_frame(client, dict(version=1, method="health", params={}))
-        assert read_frame(client)["result"] == dict(status="ok", source="host", mutations=False)
+        result = read_frame(client)["result"]
+        assert {k: result[k] for k in ("status", "source", "mutations")} == dict(
+            status="ok", source="host", mutations=False
+        )
+        assert result["roots"] == dict(home_base="/home", data_base="/data", share_base="/data/shared")
+        assert type(result["root_readiness"]["ready"]) is bool
         worker.join(timeout=3)
         assert not worker.is_alive()
     finally:

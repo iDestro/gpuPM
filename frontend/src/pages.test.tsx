@@ -1,10 +1,11 @@
+import { UserTaskPolicy } from "./user-groups";
 import { afterEach, expect, test, vi } from "vitest";
 import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { QueryClientProvider } from "@tanstack/react-query";
 import { MemoryRouter } from "react-router-dom";
 import { queryClient, setSession } from "./api";
-import { Accounts, Storage, Tasks, BusinessUsers, SystemGroups } from "./pages";
+import { Accounts, Storage, Tasks, SystemGroups } from "./pages";
 import App from "./App";
 const account = {
   id: "alice",
@@ -34,7 +35,7 @@ function mockServer() {
     let data: unknown = [];
     if (path === "/api/auth/me")
       data = { username: "admin", csrf_token: "csrf" };
-    else if (path === "/api/health") data = { mode: "demo", status: "ok" };
+    else if (path === "/api/health") data = { mode: "demo", status: "ok", mutations: true };
     else if (path === "/api/system-users" && options?.method === "GET")
       data = [account];
     else if (path === "/api/system-groups")
@@ -150,9 +151,10 @@ test("storage displays server ACL diagnosis without claiming tool presence means
     ),
   );
   renderPage(<Storage />);
-  await screen.findByText("ACL 能力：不可用");
+  await screen.findByText("共享权限工具不可用");
+  await userEvent.click(screen.getByText("存储诊断详情"));
   expect(
-    screen.getByText("目标数据卷未验证 ACL，需宿主机检查挂载与实际访问"),
+    screen.getByText(/目标数据卷未验证 ACL，需宿主机检查挂载与实际访问/),
   ).toBeInTheDocument();
 });
 test("account creation supports SSH public key without requiring an initial password", async () => {
@@ -192,12 +194,12 @@ test("storage cold cache shows collecting state", async () => {
 });
 
 test("accounts default to human scope and other accounts remain readonly", async () => {
-  const request = vi.fn(async (url: string) => new Response(JSON.stringify(url.startsWith("/api/system-users") ? [{...account,is_human:false}] : [])));
+  const request = vi.fn(async (url: string) => new Response(JSON.stringify(url === '/api/health' ? {mutations:true,mode:'demo'} : url.startsWith("/api/system-users") ? [{...account,is_human:false}] : [])));
   vi.stubGlobal("fetch", request);
   renderPage(<Accounts />);
   expect(await screen.findByRole("button", {name:/编\s*辑/})).toBeDisabled();
   expect(screen.getByRole("button", {name:/停\s*用/})).toBeDisabled();
-  expect(request.mock.calls[0][0]).toContain("scope=human");
+  expect(request.mock.calls.find(([url])=>url.includes("scope=human"))?.[0]).toContain("scope=human");
   await userEvent.click(screen.getByRole("combobox", {name:"账号范围"}));
   await userEvent.click(screen.getByText("其他账号（只读）", {exact:true}));
   await waitFor(()=>expect(request.mock.calls.some(([url])=>url.includes("scope=other"))).toBe(true));
@@ -206,14 +208,14 @@ test("accounts default to human scope and other accounts remain readonly", async
   await waitFor(()=>expect(request.mock.calls.some(([url])=>url.includes("scope=all"))).toBe(true));
 }, 10000);
 test("task list defaults to human and opens existing termination preview", async () => {
-  const request = vi.fn(async (url: string) => new Response(JSON.stringify(url.startsWith("/api/tasks?") ? {items:[{id:"task",name:"training",is_human:true,protected:false},{id:"service",name:"service",is_human:false}],total:2} : url.endsWith("termination-preview") ? {token:"kill-token",expires_at:"2099-01-01T00:00:00Z",members:[]} : [])));
+  const request = vi.fn(async (url: string) => new Response(JSON.stringify(url === '/api/health' ? {mutations:true,mode:'demo'} : url.startsWith("/api/tasks?") ? {items:[{id:"task",name:"training",is_human:true,protected:false},{id:"service",name:"service",is_human:false}],total:2} : url.endsWith("termination-preview") ? {token:"kill-token",expires_at:"2099-01-01T00:00:00Z",members:[]} : [])));
   vi.stubGlobal("fetch", request);
   renderPage(<Tasks />, "/tasks");
   const buttons = await screen.findAllByRole("button", {name:"终止任务"});
   expect(buttons[0]).toBeEnabled();
   expect(buttons[1]).toBeDisabled();
-  expect(request.mock.calls[0][0]).toContain("scope=human");
-  expect(request.mock.calls[0][0]).toContain("status=active");
+  expect(request.mock.calls.find(([url])=>url.includes("scope=human"))?.[0]).toContain("scope=human");
+  expect(request.mock.calls.find(([url])=>url.startsWith("/api/tasks?"))?.[0]).toContain("status=active");
   expect(screen.getByText("全部进行中任务", {exact:true})).toBeVisible();
   expect(request.mock.calls.some(([url]) => url === "/api/users?scope=human")).toBe(true);
   await userEvent.click(buttons[0]);
@@ -222,9 +224,9 @@ test("task list defaults to human and opens existing termination preview", async
   expect(request.mock.calls.some(([url])=>url.endsWith("/terminate"))).toBe(false);
 });
 test("other business users cannot edit policy", async () => {
-  vi.stubGlobal("fetch", vi.fn(async (url:string)=>new Response(JSON.stringify(url === "/api/users" ? [{uid:1,username:"service",is_human:false}] : []))));
-  renderPage(<BusinessUsers />, "/users");
-  expect(await screen.findByRole("button",{name:"编辑策略"})).toBeDisabled();
+  vi.stubGlobal("fetch", vi.fn(async (url:string)=>new Response(JSON.stringify(url === '/api/health' ? {mutations:true,mode:'demo'} : url === "/api/users" ? [{uid:1,username:"service",is_human:false}] : []))));
+  renderPage(<UserTaskPolicy account={{uid:1}}/>, "/users");
+  expect(await screen.findByRole("button",{name:"配置任务策略"})).toBeDisabled();
 });
 
 test("human system group is readonly even without a protected flag", async () => {

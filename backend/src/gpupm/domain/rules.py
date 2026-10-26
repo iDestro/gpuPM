@@ -33,6 +33,19 @@ def deadline(start: datetime, max_runtime: int | None, expires: datetime | None)
     return min(candidates) if candidates else None
 
 
+def task_timing(task, now):
+    started = parse_time(task["started_at"])
+    due = deadline(started, task.get("max_runtime_seconds"), parse_time(task.get("expires_at")))
+    finished = task["status"] == "finished"
+    observed_end = parse_time(task.get("finished_at")) if finished else now
+    return dict(
+        deadline_at=due.isoformat() if due else None,
+        runtime_seconds=max(0, (observed_end - started).total_seconds()) if observed_end else None,
+        remaining_seconds=(due - now).total_seconds() if due and not finished else None,
+        overdue=bool(due and due <= now and not finished),
+    )
+
+
 def account_status(*, deleted, disabled, expired):
     return "deleted" if deleted else "disabled" if disabled else "expired" if expired else "active"
 

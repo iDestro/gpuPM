@@ -10,7 +10,7 @@ const permission = {id:'project',name:'project',gid:9000,kind:'permission',manag
 const rows = [permission,{...permission,id:'primary',name:'primary',primary_users:['alice']},{...permission,id:'shared',name:'shared',share_refs:['share-1']},{...permission,id:'human',name:'human',kind:'platform',assignable:false},{...permission,id:'alice',name:'alice',gid:1001,kind:'private',assignable:false},{...permission,id:'bob',name:'bob',gid:1002,kind:'private',assignable:false},{...permission,id:'daemon',name:'daemon',kind:'system',assignable:false},{...permission,id:'existing',name:'existing',managed:false,assignable:false,can_adopt:true}];
 const account = {id:'alice',username:'alice',uid:1001,gid:1001,private_gid:1001,private_group:'alice',primary_group:'daemon',groups:['human','project','daemon'],managed:true,is_human:true,status:'active',revision:3,priority:50,public_keys:[]};
 function setup(page: React.ReactNode) {
- const fetch=vi.fn(async(url:string,options?:RequestInit)=>new Response(JSON.stringify(url.includes('/change-preview') ? {token:'group-token',expires_at:'2099-01-01T00:00:00Z'} : url.startsWith('/api/system-groups') ? url.includes('scope=managed') ? rows.filter(r=>r.assignable) : url.includes('scope=other') ? rows.filter(r=>!r.assignable) : rows : url.startsWith('/api/system-users') ? [account] : url==='/api/shares' ? [{id:'share',name:'legacy',reader_group:'human',writer_group:'daemon',notes:'keep',revision:3}] : [])));
+ const fetch=vi.fn(async(url:string,options?:RequestInit)=>new Response(JSON.stringify(url === '/api/health' ? {mutations:true,mode:'demo'} : url.includes('/change-preview') ? {token:'group-token',expires_at:'2099-01-01T00:00:00Z'} : url.startsWith('/api/system-groups') ? url.includes('scope=managed') ? rows.filter(r=>r.assignable) : url.includes('scope=other') ? rows.filter(r=>!r.assignable) : rows : url.startsWith('/api/system-users') ? [account] : url==='/api/shares' ? [{id:'share',name:'legacy',reader_group:'human',writer_group:'daemon',members:[],notes:'keep',revision:3}] : [])));
  vi.stubGlobal('fetch',fetch);
  render(<QueryClientProvider client={queryClient}><MemoryRouter>{page}</MemoryRouter></QueryClientProvider>);
  return fetch;
@@ -70,21 +70,18 @@ test('account editable groups exclude readonly identities and primary supports c
 test('notes editing preserves disabled legacy share bindings',async()=>{
  const fetch=setup(<Shares/>);
  await userEvent.click(await screen.findByRole('button',{name:'编辑授权'}));
- await userEvent.click(screen.getByLabelText('只读系统组'));
- expect(document.querySelector('.ant-select-item-option[title="human"]')).toHaveClass('ant-select-item-option-disabled');
- expect(screen.queryByRole('option',{name:'daemon'})).not.toBeInTheDocument();
- await userEvent.keyboard('{Escape}');
+ expect(screen.queryByText('只读组',{exact:true})).not.toBeInTheDocument();
  await userEvent.clear(screen.getByLabelText('备注'));
  await userEvent.type(screen.getByLabelText('备注'),'notes only');
  await userEvent.click(screen.getByRole('button',{name:/保\s*存/}));
  await screen.findByLabelText('操作原因');
  const preview=fetch.mock.calls.find(([url])=>url.endsWith('/change-preview'));
- expect(JSON.parse(String(preview?.[1]?.body)).changes).toMatchObject({reader_group:'human',writer_group:'daemon',notes:'notes only'});
+ expect(JSON.parse(String(preview?.[1]?.body)).changes).toMatchObject({notes:'notes only'});
 },15000);
 test('English permission group scope and classification are translated',async()=>{
  setLocale('en-US');
  setup(<SystemGroups/>);
- expect(await screen.findByRole('heading',{name:'Linux permission groups'})).toBeVisible();
+ expect(await screen.findByRole('heading',{name:'System user groups'})).toBeVisible();
  await userEvent.click(screen.getByRole('combobox',{name:'Permission group scope'}));
  await userEvent.click(screen.getByText('Other groups (read only)',{exact:true}));
  expect(await screen.findByText('Personnel classification group')).toBeVisible();
@@ -104,7 +101,7 @@ test('readonly group rows have no edit or delete even if managed and unprotected
 test('accounts cannot open an edit snapshot until group inventory resolves',async()=>{
  let resolve!: (value:Response)=>void;
  const inventory=new Promise<Response>(done=>{resolve=done;});
- vi.stubGlobal('fetch',vi.fn(async(url:string)=>url.includes('/system-groups') ? inventory : new Response(JSON.stringify(url.startsWith('/api/system-users') ? [account] : []))));
+ vi.stubGlobal('fetch',vi.fn(async(url:string)=>url.includes('/system-groups') ? inventory : new Response(JSON.stringify(url === '/api/health' ? {mutations:true,mode:'demo'} : url.startsWith('/api/system-users') ? [account] : []))));
  render(<QueryClientProvider client={queryClient}><MemoryRouter><Accounts/></MemoryRouter></QueryClientProvider>);
  expect(await screen.findByRole('button',{name:/编\s*辑/})).toBeDisabled();
  expect(screen.getByRole('button',{name:'创建账号'})).toBeDisabled();
@@ -123,5 +120,5 @@ test('existing group edits keep revision outside preview changes',async()=>{
  await userEvent.click(screen.getByRole('button',{name:/保\s*存/}));
  await waitFor(()=>expect(fetch.mock.calls.some(([url])=>url.endsWith('/change-preview'))).toBe(true));
  const preview=fetch.mock.calls.find(([url])=>url.endsWith('/change-preview'));
- expect(JSON.parse(String(preview?.[1]?.body))).toEqual({action:'update',revision:3,changes:{name:'renamed-project',members:[]}});
+ expect(JSON.parse(String(preview?.[1]?.body))).toEqual({action:'update',revision:3,changes:{name:'renamed-project'}});
 });

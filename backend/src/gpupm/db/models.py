@@ -34,6 +34,8 @@ class ManagementGroup(Base):
     name: Mapped[str] = mapped_column(String(64), unique=True)
     priority: Mapped[int] = mapped_column(Integer, default=50)
     notes: Mapped[str] = mapped_column(Text, default="")
+    is_custom: Mapped[bool] = mapped_column(Boolean, default=False)
+    policy_overrides: Mapped[dict] = mapped_column(JSON, default=dict)
     is_default: Mapped[bool] = mapped_column(Boolean, default=False)
 
 
@@ -44,11 +46,15 @@ class ManagedUser(Base):
     group_id: Mapped[int] = mapped_column(ForeignKey("management_groups.id"), default=1)
     priority: Mapped[int] = mapped_column(Integer, default=50)
     notes: Mapped[str] = mapped_column(Text, default="")
+    personal_policy: Mapped[dict] = mapped_column(JSON, default=dict)
     account_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
 
 class TaskConfig(Base):
     __tablename__ = "task_policies"
+    assignment_snapshot: Mapped[dict] = mapped_column(JSON, default=dict)
+    policy_sources: Mapped[dict] = mapped_column(JSON, default=dict)
+    priority_snapshot: Mapped[list | None] = mapped_column(JSON, nullable=True)
     task_id: Mapped[str] = mapped_column(String(64), primary_key=True)
     policy: Mapped[dict] = mapped_column(JSON, default=dict)
     revision: Mapped[int] = mapped_column(Integer, default=1)
@@ -58,6 +64,7 @@ class TaskConfig(Base):
 class Setting(Base):
     __tablename__ = "settings"
     id: Mapped[int] = mapped_column(Integer, primary_key=True, default=1)
+    policy_epoch: Mapped[str | None] = mapped_column(String(40), nullable=True)
     values: Mapped[dict] = mapped_column(JSON)
 
 

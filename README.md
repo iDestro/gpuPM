@@ -1,6 +1,6 @@
 # gpuPM
 
-管理员管理现有 SSH/nohup 启动的 NVIDIA GPU 任务，并管理 Ubuntu 本地账号、系统组、期限、私人数据目录、配额及共享目录。
+管理员管理现有 SSH/nohup 启动的 NVIDIA GPU 任务，并管理 Ubuntu 本地账号、系统组、期限、私人数据目录、用量告警及共享目录。共享采用用户组与 ACL 控制访问，不设置磁盘容量限额。
 
 - React + TypeScript + Ant Design + TanStack Query
 - Python 3.12 + FastAPI + SQLite

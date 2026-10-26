@@ -9,7 +9,7 @@ API 使用普通系统账号 gpupm。agent 必须为 Linux root，代码、venv�
 ## 安装步骤
 
 1. 在开发机执行后端全部测试、React 测试/类型检查/构建及 E2E。记录 Git 版本。
-2. 在 Ubuntu 安装 Python 3.12、venv、uv（或使用锁定依赖导出），以及实际功能所需的 quota、xfsprogs、acl、libpwquality。安装过程不修改用户训练 Conda 环境。
+2. 在 Ubuntu 安装 Python 3.12、venv、uv（或使用锁定依赖导出），以及实际功能所需的 acl、libpwquality。安装过程不修改用户训练 Conda 环境。
 3. 使用系统账号工具创建 gpupm 服务账号（无普通登录、无 sudo），不通过 Web 授予敏感组。
 4. 发布到 `/opt/gpupm/releases/<版本>`，root 拥有并禁止组/其他用户写入；建立该发布专属 `.venv`，安装锁定依赖。`/opt/gpupm/current` 由 root 指向发布版本。
 5. 创建 `/var/lib/gpupm/api`（gpupm 拥有，0700）、`/var/lib/gpupm/agent`（root 拥有，0700）、`/etc/gpupm`（root 拥有）、`/run/gpupm`。
@@ -37,7 +37,7 @@ sudo -u gpupm env GPUPM_DATABASE=/var/lib/gpupm/api/app.db .venv/bin/gpupm admin
 API 使用自定义目录时，在 `/etc/gpupm/api.env` 设置与 agent 相同的 `GPUPM_HOME_BASE`、`GPUPM_DATA_BASE`，保证界面显示的初始化目录一致。
 
 9. 安装 `deploy/systemd/` 中两个 unit，daemon-reload，先启动 agent 再启动 API。只读检查设备、进程、账号、日志、存储能力，确认与 nvidia-smi/系统事实一致。
-10. 写操作先在专用测试账号/测试进程及隔离配额文件系统中验收。完成后才将 root 配置 `allow_mutations` 改为 true 并重启 agent。生产用户软删除保留账号及文件，不调用 userdel；结束 GPU 任务另走预览流程。
+10. 写操作先在专用测试账号/测试进程与共享目录中验收。完成后才将 root 配置 `allow_mutations` 改为 true 并重启 agent。生产用户软删除保留账号及文件，不调用 userdel；结束 GPU 任务另走预览流程。
 
 ## 访问
 
@@ -59,13 +59,13 @@ ssh -L 8000:127.0.0.1:8000 wzx-ubuntu
 
 由服务器 root 管理员处理：停止 agent 并备份两库，核对审计、getent 账号名/UID/GID/主目录、旧新目录的实际位置/属主、~/data 链接及登录限制。保留所有文件，依据已完成步骤修复到一个一致状态，核对账号生命周期和目录锚点后才清除 agent 状态中的 rename_recovery_required。重新启动只读核验，再恢复写能力；不能只清标记或以删除重建账号代替恢复。
 
-## 配额、私人目录和共享
+## 目录用量、私人目录和共享
 
-目录扫描用量与 UID/文件系统 quota 用量口径不同，同一个文件系统上的 home/data 不能当成两份独立用户 quota。0 限额为不限额，容量/inode 超限可能导致写入失败。变更先核对实际用量与预览，不能自动删文件解决超限。
+平台展示个人与共享目录用量、文件系统可用容量以及容量/inode告警，不设置每用户磁盘限额。
 
-宽限期留空保留已有期限；填写仅调整当前已经超软限额的用户期限。将来首次超限采用文件系统的原生统一宽限期，软件不修改全卷默认值。
+共享项目由本机读写组、只读组和默认 ACL 控制访问，不是新增 SMB/NFS 文件服务器。
 
-quota 的启用取决于 ext4/XFS 功能与挂载状态。不支持时只显示统计和明确错误；软件不自动格式化、重挂载或重启生产卷。使用隔离 VM/测试 loopback 文件系统验证硬限额、inode、宽限和读回，不把生产分区填满。
+无需安装 quota 工具或启用文件系统配额，也不需要为此重挂载或重启。平台不会自动删除数据或清除管理员在平台外设置的原生限制。
 
 私人目录默认0700、umask077；用户可主动改变自己文件权限，这不是容器隔离。共享 root 根下的 reader/writer 组与 default ACL 必须实测有效 mask、新文件继承及0600创建限制。撤销成员不撤销旧进程的组凭据或已打开句柄，需重新登录/检查活动；不会自动结束用户会话。
 
@@ -90,4 +90,4 @@ journalctl -u gpupm-agent -u gpupm-api --since today
 curl -fsS http://127.0.0.1:8000/api/health
 ```
 
-检查 agent 心跳、采样时间、策略 applied/pending/failed、数据库可写性、数据卷身份与 quota/ACL 能力、SSH日志覆盖。异常时禁止报告操作成功；不自动 reset GPU，也不按低利用率杀任务。
+检查 agent 心跳、采样时间、策略 applied/pending/failed、数据库可写性、数据卷身份与 ACL 能力、SSH日志覆盖。异常时禁止报告操作成功；不自动 reset GPU，也不按低利用率杀任务。

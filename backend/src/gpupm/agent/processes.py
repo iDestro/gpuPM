@@ -186,6 +186,10 @@ def group_processes(processes, previous, excluded=(), ignored_executables=()):
             "original_name",
             next((p["command"][:120] for p in old_members if p.get("gpu_memory")), None),
         )
+        task["gpu_uuids"] = sorted(
+            set(task.get("gpu_uuids", []))
+            | {gpu for m in old_members for gpu in m.get("gpu_memory", {})}
+        )
         old_pids = {p["pid"] for p in old_members}
         task.setdefault(
             "leader_identities", [p["identity"] for p in old_members if p["ppid"] not in old_pids]
@@ -224,7 +228,7 @@ def group_processes(processes, previous, excluded=(), ignored_executables=()):
         task["historic_identities"] = sorted(historic)
         task["status"] = "running" if members else "finished"
         task["anomalies"] = []
-        if members and any(p["ppid"] == 1 for p in members):
+        if members and any(p["ppid"] == 1 and p["identity"] not in task["leader_identities"] for p in members):
             task["anomalies"].append("orphan")
         if any(p["status"] in {"zombie", "Z"} for p in members):
             task["anomalies"].append("zombie")
@@ -299,6 +303,10 @@ def group_processes(processes, previous, excluded=(), ignored_executables=()):
             )
         )
     for task in tasks:
+        task["gpu_uuids"] = sorted(
+            set(task.get("gpu_uuids", []))
+            | {gpu for m in task["members"] for gpu in m.get("gpu_memory", {})}
+        )
         task.setdefault("ignored", False)
         leaders = task.get("leader_identities", [])
         task["leaders_present"] = any(identity_key(i) in observed_keys for i in leaders)
@@ -432,6 +440,12 @@ def residual_ready(task, now):
 
 def residual_status(task, now, cleaning=False):
     leaders = task.get("leader_identities", [])
+    if task["members"]:
+        task["last_seen_at"] = now.isoformat()
+        task["finished_at"] = None
+    elif task.get("last_seen_at") and not task.get("finished_at"):
+        # This is collection-confirmed exit time; legacy ended tasks remain unknown.
+        task["finished_at"] = now.isoformat()
     if not task["members"]:
         task.update(status="finished", finalizing_since=None, orphan_remaining_seconds=None)
     elif (

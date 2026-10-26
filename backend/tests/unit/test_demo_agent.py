@@ -73,7 +73,6 @@ def test_demo_human_membership_is_computed_and_other_is_readonly(tmp_path):
         ("apply_task_policy", dict(task_id=task["id"], revision=1, policy={})),
         ("preview_termination", dict(task_id=task["id"])),
         ("preview_account_change", dict(id=account["id"], revision=1, action="disable")),
-        ("preview_quota", dict(id=account["id"], policy={"filesystem_id": "demo-fs"})),
         ("preview_group_change", dict(id="human", action="delete")),
     ]:
         with pytest.raises(DomainError):
@@ -127,3 +126,27 @@ def test_primary_human_membership_survives_primary_group_change(tmp_path):
     assert agent.dispatch(state, "list_accounts", {})[0]["is_human"]
     assert account["gid"] != human["gid"]
     assert account["username"] in human["members"]
+
+
+def test_pid_one_service_leader_preview_matches_host_and_exit_time_freezes(tmp_path, monkeypatch):
+    from datetime import timedelta
+    from gpupm.domain.rules import utcnow
+
+    now = utcnow()
+    monkeypatch.setattr('gpupm.agent.demo.utcnow', lambda: now)
+    agent = DemoAgent(tmp_path / 'service.db')
+    state = agent.seed()
+    task = state['tasks'][0]
+    task['members'] = [dict(task['members'][0], ppid=1)]
+    task['leader_identities'] = [task['members'][0]['identity']]
+    task = agent.dispatch(state, 'snapshot', {})['tasks'][0]
+    now += timedelta(seconds=300)
+    preview = agent.dispatch(state, 'preview_termination', dict(task_id=task['id']))
+    assert len(preview['targets']) == 1
+    agent.dispatch(state, 'execute_termination', dict(task_id=task['id'], token=preview['token'],
+                   reason='service test', idempotency_key='service-test'))
+    ended = agent.dispatch(state, 'snapshot', {})['tasks'][0]
+    assert ended['status'] == 'finished'
+    assert ended['finished_at'] == now.isoformat()
+    now += timedelta(hours=1)
+    assert agent.dispatch(state, 'snapshot', {})['tasks'][0]['finished_at'] == ended['finished_at']

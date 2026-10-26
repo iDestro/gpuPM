@@ -62,7 +62,6 @@ def load_config(path):
 def serve(config):
     if os.geteuid() != 0 or not hasattr(socket, "SO_PEERCRED"):
         raise DomainError("platform_unsupported", "agent requires Linux root", 503)
-    service = AgentService(config)
     path = Path(config.get("socket_path", "/run/gpupm/agent.sock"))
     lockfd = os.open(str(path) + ".lock", os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW, 0o600)
     lockinfo = os.fstat(lockfd)
@@ -72,8 +71,15 @@ def serve(config):
         or lockinfo.st_nlink != 1
         or lockinfo.st_mode & 0o077
     ):
+        os.close(lockfd)
         raise DomainError("unsafe_socket", "lock file must be a root-owned private regular file", 403)
-    fcntl.flock(lockfd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    try:
+        fcntl.flock(lockfd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        # Startup recovery writes state, so it must also hold the singleton lock.
+        service = AgentService(config)
+    except BaseException:
+        os.close(lockfd)
+        raise
     if os.path.lexists(path):
         info = path.lstat()
         if not stat.S_ISSOCK(info.st_mode) or info.st_uid != 0:

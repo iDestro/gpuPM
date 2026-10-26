@@ -1,0 +1,12 @@
+import {useState} from 'react';
+import {afterEach,expect,test} from 'vitest';
+import {cleanup,render,screen} from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
+import {ShareMemberEditor,type ShareMember} from './share-members';
+import {setLocale} from './i18n';
+afterEach(()=>{cleanup();setLocale('zh-CN');});
+function Editor(){const [value,setValue]=useState<ShareMember[]>([]);return <ShareMemberEditor value={value} onChange={setValue} accounts={[{username:'alice',managed:true,is_human:true,status:'active'},{username:'root',managed:true,is_human:true,protected:true,status:'active'}]}/>;}
+test('add defaults to read, edit permission, and remove without exposing system groups',async()=>{render(<Editor/>);await userEvent.click(screen.getByRole('combobox',{name:'选择共享成员'}));expect(screen.queryByText('root',{exact:true})).not.toBeInTheDocument();await userEvent.click(screen.getByRole('option',{name:'alice'}));await userEvent.click(screen.getByRole('button',{name:'添加成员'}));expect(screen.getByText('只读',{exact:true})).toBeInTheDocument();await userEvent.click(screen.getByText('读写',{exact:true}));expect(screen.getByRole('radio',{name:'读写'})).toBeChecked();await userEvent.click(screen.getByRole('button',{name:'移除 alice'}));expect(screen.queryByRole('radio',{name:'读写'})).not.toBeInTheDocument();});
+test('member editor supports English',()=>{setLocale('en-US');render(<Editor/>);expect(screen.getByRole('button',{name:'Add members'})).toBeDisabled();expect(screen.getByRole('combobox',{name:'Select shared directory members'})).toBeInTheDocument();});
+test('deleted existing members are identified while active gpu_trial remains selectable',async()=>{render(<ShareMemberEditor value={[{username:'old_test',permission:'write'}]} accounts={[{username:'old_test',managed:true,is_human:true,status:'deleted',deleted_at:'2026-10-15'},{username:'gpu_trial',managed:true,is_human:true,status:'active'}]}/>);expect(screen.getByText('已软删除',{exact:true})).toBeInTheDocument();expect(screen.getByText(/old_test.*请移除/)).toBeInTheDocument();await userEvent.click(screen.getByRole('combobox',{name:'选择共享成员'}));expect(screen.getByRole('option',{name:'gpu_trial'})).toBeInTheDocument();});
+test('server rejection names the actual rejected member',async()=>{const {ErrorAlert}=await import('./components');const {ApiError}=await import('./api');render(<ErrorAlert error={new ApiError(403,'invalid_share_member','Invalid shared member: old_test')}/>);expect(screen.getByText('成员 old_test 当前不可授权，请在成员列表查看状态或将其移除。')).toBeInTheDocument();});

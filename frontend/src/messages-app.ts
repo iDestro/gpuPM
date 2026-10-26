@@ -5,7 +5,7 @@ export const appMessages: Record<string, string> = {
   "GPU 任务": "GPU tasks",
   "业务优先级组": "Business priority groups",
   "用户业务策略": "User business policies",
-  "Linux 本地账号": "Linux local accounts",
+  "本地账号": "Local accounts",
   "Linux 系统组": "Linux system groups",
   "存储与容量": "Storage and capacity",
   "团队共享目录": "Team shared directories",

@@ -1,3 +1,5 @@
+import { UserGroups } from "./user-groups";
+import { MutationStatus, useHostMutations } from "./readiness";
 import { useEffect, useRef, useState } from "react";
 import {
   Button,
@@ -17,14 +19,13 @@ import {
   DashboardOutlined,
   ClusterOutlined,
   TeamOutlined,
+  SafetyCertificateOutlined,
   UserOutlined,
   SettingOutlined,
   FileSearchOutlined,
   HddOutlined,
   ShareAltOutlined,
   HistoryOutlined,
-  OrderedListOutlined,
-  SolutionOutlined,
   LogoutOutlined,
   MenuOutlined,
   MenuFoldOutlined,
@@ -42,8 +43,6 @@ import { useI18n } from "./i18n";
 import { ErrorAlert } from "./components";
 import {
   Accounts,
-  BusinessGroups,
-  BusinessUsers,
   Logs,
   Overview,
   Settings,
@@ -56,10 +55,9 @@ import {
 const menu = [
   { key: "/", label: "服务器总览", icon: <DashboardOutlined /> },
   { key: "/tasks", label: "GPU 任务", icon: <ClusterOutlined /> },
-  { key: "/groups", label: "业务优先级组", icon: <OrderedListOutlined /> },
-  { key: "/users", label: "用户业务策略", icon: <SolutionOutlined /> },
-  { key: "/accounts", label: "Linux 本地账号", icon: <UserOutlined /> },
-  { key: "/system-groups", label: "Linux 权限组", icon: <TeamOutlined /> },
+  { key: "/groups", label: "任务策略组", icon: <TeamOutlined /> },
+  { key: "/accounts", label: "本地账号", icon: <UserOutlined /> },
+  { key: "/system-groups", label: "系统用户组", icon: <SafetyCertificateOutlined /> },
   { key: "/storage", label: "存储与容量", icon: <HddOutlined /> },
   { key: "/shares", label: "团队共享目录", icon: <ShareAltOutlined /> },
   { key: "/login-events", label: "SSH 登录记录", icon: <HistoryOutlined /> },
@@ -70,7 +68,8 @@ export default function App() {
   const { locale, t, setLocale } = useI18n();
   const languageSelect = <Select className="language-select" size="small" aria-label="语言 / Language" value={locale} onChange={setLocale} options={[{ value: "zh-CN", label: "中文" }, { value: "en-US", label: "English" }]} style={{ width: 88 }} />;
   const [user, setUser] = useState<Session | null>(null);
-  const [mode, setMode] = useState<string>();
+  const {health} = useHostMutations();
+  const mode = health?.mode;
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<unknown>();
   const [logoutBusy, setLogoutBusy] = useState(false);
@@ -93,7 +92,6 @@ export default function App() {
   }, [location.pathname]);
   useEffect(() => {
     let active = true;
-    api<{mode:string}>("/health").then(value => { if (active) setMode(value.mode); }).catch(() => {});
     api<Session>("/auth/me")
       .then((value) => {
         if (active) {
@@ -209,14 +207,14 @@ export default function App() {
     );
   const selected = location.pathname.startsWith("/tasks/")
     ? "/tasks"
-    : location.pathname;
+    : (location.pathname.startsWith("/accounts/")) ? "/accounts" : location.pathname;
   const localizedMenu = menu.map(item => ({ ...item, label: t(item.label), title: t(item.label), "aria-label": t(item.label) }));
   const navigationItems = [
-    { type: "group" as const, label: t("资源监控"), children: localizedMenu.slice(0, 2) },
-    { type: "group" as const, label: t("账号与权限"), children: [localizedMenu[4], localizedMenu[5], localizedMenu[2], localizedMenu[3]] },
-    { type: "group" as const, label: t("存储协作"), children: localizedMenu.slice(6, 8) },
-    { type: "group" as const, label: t("记录与设置"), children: [localizedMenu[8], localizedMenu[10], localizedMenu[9]] },
-  ];
+    {label:"资源监控", paths:["/", "/tasks"]},
+    {label:"账号与权限", paths:["/accounts", "/groups", "/system-groups"]},
+    {label:"存储协作", paths:["/storage", "/shares"]},
+    {label:"记录与设置", paths:["/login-events", "/audit", "/settings"]},
+  ].map(section => ({type:"group" as const, label:t(section.label), children:section.paths.map(path=>localizedMenu.find(item=>item.key === path)!)}));
   const navigation = (collapsed = false, id = "drawer-navigation") => <>
     <div className="brand">
       <span className="brand-mark">G</span>
@@ -246,6 +244,7 @@ export default function App() {
           </div>
           <div className="topbar-actions">
             {languageSelect}
+            <MutationStatus />
             <Tag color={mode === "demo" ? "orange" : "blue"}>{mode === "demo" ? t("演示模式 · 不操作宿主机") : mode === "host" ? t("真实服务器") : t("模式待核验")}</Tag>
             <Typography.Text className="header-user">{user.username}</Typography.Text>
             <Button type="text" aria-label={t("退出")} icon={<LogoutOutlined />} loading={logoutBusy} onClick={logout}><span className="logout-label">{t("退出")}</span></Button>
@@ -258,9 +257,11 @@ export default function App() {
             <Route path="/" element={<Overview />} />
             <Route path="/tasks" element={<Tasks />} />
             <Route path="/tasks/:id" element={<TaskDetail />} />
-            <Route path="/groups" element={<BusinessGroups />} />
-            <Route path="/users" element={<BusinessUsers />} />
-            <Route path="/accounts" element={<Accounts />} />
+            <Route path="/groups" element={<UserGroups />} />
+            <Route path="/users" element={<Navigate to="/accounts" replace />} />
+            <Route path="/accounts" element={<Accounts key="list" />} />
+            <Route path="/accounts/:id" element={<Accounts key={location.pathname} />} />
+            <Route path="/advanced/system-groups" element={<Navigate to="/system-groups" replace />} />
             <Route path="/system-groups" element={<SystemGroups />} />
             <Route path="/storage" element={<Storage />} />
             <Route path="/shares" element={<Shares />} />

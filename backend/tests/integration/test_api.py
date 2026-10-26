@@ -141,27 +141,6 @@ def test_share_create_requires_server_preview(client):
     assert created.json()["path"] == "/data/shared/dataset"
 
 
-def test_quota_changes_require_specific_usage_preview(client):
-    headers = login(client)
-    account = client.get("/api/system-users?state=all").json()[0]
-    fields = {
-        "filesystem_id": "demo-fs",
-        "soft_bytes": 1024,
-        "hard_bytes": 2048,
-        "soft_inodes": 0,
-        "hard_inodes": 0,
-        "grace_seconds": 60,
-    }
-    path = f"/api/system-users/{account['id']}/quotas"
-    assert client.patch(path, json=fields, headers=headers).status_code == 409
-    preview = client.post(path + "/preview", json=fields, headers=headers)
-    assert preview.status_code == 200, preview.text
-    assert "impact" in preview.json()
-    changed = client.patch(
-        path, json={**fields, "token": preview.json()["token"], "reason": "限制测试"}, headers=headers
-    )
-    assert changed.status_code == 200, changed.text
-    assert client.get(path).json()[0]["hard_bytes"] == 2048
 
 
 def test_password_never_echoed_or_stored_in_preview(client, app):
@@ -296,7 +275,9 @@ def test_key_only_account_creation_and_primary_group(client):
         "/api/system-users",
         json={
             "username": "carol",
-            "public_keys": ["ssh-ed25519 AAAAfixture"],
+            "public_keys": [
+                "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+            ],
             "require_password_change": False,
         },
         headers=headers,
@@ -322,20 +303,6 @@ def test_key_only_account_creation_and_primary_group(client):
     assert empty.status_code == 422
 
 
-def test_quota_edit_does_not_reset_grace_when_omitted(client, app):
-    headers = login(client)
-    account = client.get("/api/system-users?state=all").json()[0]
-    policy = {"filesystem_id": "demo-fs", "soft_bytes": 1024, "hard_bytes": 4096}
-    preview = client.post(f"/api/system-users/{account['id']}/quotas/preview", json=policy, headers=headers)
-    assert preview.status_code == 200
-    assert "grace_seconds" not in preview.json()["proposed"]
-    applied = client.patch(
-        f"/api/system-users/{account['id']}/quotas",
-        json=dict(policy, token=preview.json()["token"]),
-        headers=headers,
-    )
-    assert applied.status_code == 200, applied.text
-    assert "grace_seconds" not in applied.json()
 
 
 def mark_bob_other(app):
@@ -613,3 +580,238 @@ def test_executable_allowlist_hides_old_tasks_and_reverses(client, app):
             == 422
         )
     assert client.get("/api/settings").json()["ignored_task_executables"] == []
+
+
+@pytest.mark.parametrize("missing_group", [False, True])
+def test_authoritative_mutation_health_and_fresh_credential_recovery(client, app, missing_group):
+    import json
+    import sqlite3
+
+    assert client.get("/api/health").json()["mutations"] is True
+    headers = login(client)
+    group = client.post(
+        "/api/groups", json={"name": "recovered-profile", "priority": 70}, headers=headers
+    ).json()
+    account = next(a for a in client.get("/api/system-users").json() if not a["protected"])
+    with sqlite3.connect(app.state.config.agent_database) as db:
+        state = json.loads(db.execute("SELECT data FROM state WHERE id=1").fetchone()[0])
+        pending = next(a for a in state["accounts"] if a["id"] == account["id"])
+        pending["creation"] = dict(
+            status="incomplete",
+            stage="credentials",
+            started_at="2026-01-01T00:00:00+00:00",
+            profile={"group_id": 9999 if missing_group else group["id"], "priority": 17},
+        )
+        db.execute("UPDATE state SET data=? WHERE id=1", (json.dumps(state),))
+    account = client.get(f"/api/system-users/{account['id']}").json()
+    assert "creation_incomplete" in account["readonly_reasons"]
+    preview = client.post(
+        f"/api/system-users/{account['id']}/change-preview",
+        headers=headers,
+        json=dict(action="resume", revision=account["revision"], changes={}),
+    )
+    assert preview.status_code == 200, preview.text
+    payload = dict(
+        token=preview.json()["token"], revision=account["revision"], reason="Resume failed initialization"
+    )
+    assert (
+        client.post(f"/api/system-users/{account['id']}/resume", headers=headers, json=payload).status_code
+        == 422
+    )
+    payload["password"] = "Fresh-recovery-password-123"
+    result = client.post(f"/api/system-users/{account['id']}/resume", headers=headers, json=payload)
+    assert result.status_code == 200, result.text
+    assert result.json()["creation"]["status"] == "complete"
+    recovered = client.get(f"/api/system-users/{account['id']}").json()
+    assert recovered["group_id"] == (1 if missing_group else group["id"]) and recovered["priority"] == 17
+    if missing_group:
+        audit = client.get("/api/audit-logs", params={"action": "account.recovery_profile_default"}).json()[
+            "items"
+        ]
+        assert len(audit) == 1 and "9999" in audit[0]["reason"]
+    with sqlite3.connect(app.state.config.agent_database) as db:
+        assert payload["password"] not in db.execute("SELECT data FROM state WHERE id=1").fetchone()[0]
+
+
+def test_health_forwards_safe_storage_readiness_and_fails_closed(client, app, monkeypatch):
+    assert client.get("/api/health").json()["root_readiness"] == {"ready": True, "error_code": None}
+
+    def health_unavailable(method, params=None):
+        from gpupm.errors import DomainError
+
+        raise DomainError("agent_unavailable", "unavailable", 503)
+
+    monkeypatch.setattr(app.state.ctx.agent, "call", health_unavailable)
+    health = client.get("/api/health").json()
+    assert not health["mutations"] and not health["root_readiness"]["ready"]
+    assert health["root_readiness"]["error_code"] == "agent_unavailable"
+
+
+def test_account_preview_binds_business_changes_before_native_mutation(client):
+    headers = login(client)
+    account = next(a for a in client.get("/api/system-users").json() if a["managed"] and not a["protected"])
+    group = client.post(
+        "/api/groups", json={"name": "preview-profile", "priority": 50}, headers=headers
+    ).json()
+    path = f"/api/system-users/{account['id']}"
+    changes = {"group_id": group["id"], "priority": 17, "notes": "native reviewed note"}
+    preview = client.post(
+        path + "/change-preview",
+        headers=headers,
+        json={"action": "update", "revision": account["revision"], "changes": changes},
+    ).json()
+    assert preview["business_changes"] == {"group_id": group["id"], "priority": 17}
+    assert preview["current"]["priority"] == account["priority"]
+    assert preview["proposed"]["group_id"] == group["id"] and preview["proposed"]["priority"] == 17
+    rejected = client.patch(
+        path,
+        headers=headers,
+        json=dict(changes, priority=18, revision=account["revision"], token=preview["token"]),
+    )
+    assert rejected.status_code == 409
+    unchanged = client.get(path).json()
+    assert unchanged["notes"] == account["notes"] and unchanged["priority"] == account["priority"]
+    preview = client.post(
+        path + "/change-preview",
+        headers=headers,
+        json={"action": "update", "revision": unchanged["revision"], "changes": changes},
+    ).json()
+    accepted = client.patch(
+        path, headers=headers, json=dict(changes, revision=unchanged["revision"], token=preview["token"])
+    )
+    assert accepted.status_code == 200, accepted.text
+    updated = client.get(path).json()
+    assert updated["priority"] == 17 and updated["group_id"] == group["id"]
+    preview = client.post(
+        path + "/change-preview",
+        headers=headers,
+        json={"action": "update", "revision": updated["revision"], "changes": {"group_id": 1}},
+    ).json()
+    accepted = client.patch(
+        path,
+        headers=headers,
+        json={"group_id": 1, "revision": updated["revision"], "token": preview["token"]},
+    )
+    assert accepted.status_code == 200, accepted.text
+    assert client.get(path).json()["priority"] == 17
+
+
+@pytest.mark.parametrize("changes", [{"priority": True}, {"group_id": -1}, {"priority": None}])
+def test_account_preview_rejects_invalid_business_fields(client, changes):
+    headers = login(client)
+    account = next(a for a in client.get("/api/system-users").json() if a["managed"] and not a["protected"])
+    result = client.post(
+        f"/api/system-users/{account['id']}/change-preview",
+        headers=headers,
+        json={"action": "update", "revision": account["revision"], "changes": changes},
+    )
+    assert result.status_code == 422
+
+
+def test_quota_feature_removed_but_storage_and_shares_remain(client, app):
+    headers = login(client)
+    for method, path in [('GET', '/api/system-users/1001/quotas'),
+                         ('POST', '/api/system-users/1001/quotas/preview'),
+                         ('PATCH', '/api/system-users/1001/quotas')]:
+        assert client.request(method, path, headers=headers, json={}).status_code in {404, 405}
+    storage = client.get('/api/storage').json()
+    assert 'quotas' not in storage
+    assert all('quota_enabled' not in fs and 'quota_supported' not in fs for fs in storage['filesystems'])
+    assert client.get('/api/shares').status_code == 200
+    assert not any('/quotas' in path for path in app.openapi()['paths'])
+
+
+def test_directory_refresh_requires_auth_and_csrf_and_updates_timestamp(client):
+    assert client.post('/api/storage/refresh').status_code == 401
+    headers = login(client)
+    assert client.post('/api/storage/refresh').status_code == 403
+    result = client.post('/api/storage/refresh', headers=headers)
+    assert result.status_code == 200
+    assert client.get('/api/storage').json()['directory_collected_at']
+
+
+def test_share_member_permissions_create_change_and_revoke(client):
+    headers = login(client)
+    users = client.get('/api/system-users').json()
+    user = next(a for a in users if a['managed'] and not a['protected'] and a['status']=='active')
+    changes = dict(name='member-project', members=[dict(username=user['username'],permission='read')])
+    preview=client.post('/api/shares/change-preview',headers=headers,json=dict(action='create',changes=changes))
+    assert preview.status_code == 200, preview.text
+    created=client.post('/api/shares',headers=headers,json=dict(changes,token=preview.json()['token']))
+    assert created.status_code == 200, created.text
+    share=created.json()
+    assert share['access_mode']=='members'
+    for permission in ('write',None):
+        members=[dict(username=user['username'],permission=permission)] if permission else []
+        preview=client.post(f"/api/shares/{share['id']}/change-preview",headers=headers,json=dict(revision=share['revision'],changes=dict(members=members)))
+        assert preview.status_code==200,preview.text
+        changed=client.patch(f"/api/shares/{share['id']}",headers=headers,json=dict(revision=share['revision'],token=preview.json()['token'],members=members))
+        assert changed.status_code==200,changed.text
+        share=changed.json()
+        listed=next(s for s in client.get('/api/shares').json() if s['id']==share['id'])
+        assert listed['members']==members
+    groups=client.get('/api/system-groups?scope=all').json()
+    owned=[g for g in groups if g.get('share_owner')=='member-project']
+    assert len(owned)==2
+    assert all(not g['assignable'] for g in owned)
+
+
+def test_shared_preview_rejects_stale_revision_like_native_agent(client):
+    headers = login(client)
+    changes = dict(name='revision-preview',members=[])
+    preview = client.post('/api/shares/change-preview',headers=headers,json=dict(action='create',changes=changes)).json()
+    share = client.post('/api/shares',headers=headers,json=dict(changes,token=preview['token'])).json()
+    params = dict(revision=share['revision'],changes=dict(notes='updated'))
+    preview = client.post(f"/api/shares/{share['id']}/change-preview",headers=headers,json=params).json()
+    result = client.patch(f"/api/shares/{share['id']}",headers=headers,json=dict(revision=share['revision'],notes='updated',token=preview['token']))
+    assert result.status_code == 200
+    stale = client.post(f"/api/shares/{share['id']}/change-preview",headers=headers,json=params)
+    assert stale.status_code == 409
+    assert stale.json()['detail']['code'] == 'revision_conflict'
+
+
+def test_gpu_filter_keeps_finished_tasks_without_live_members(client, app):
+    login(client)
+    original = app.state.ctx.agent.call
+
+    def call(method, *args, **kwargs):
+        value = original(method, *args, **kwargs)
+        if method == 'snapshot':
+            task = value['tasks'][0]
+            task.update(status='finished', members=[], gpu_uuids=['historic-gpu'])
+        return value
+
+    app.state.ctx.agent.call = call
+    app.state.ctx.invalidate()
+    rows = client.get('/api/tasks?gpu=historic-gpu&status=finished').json()['items']
+    assert len(rows) == 1
+    assert rows[0]['members'] == []
+    assert client.get('/api/tasks?gpu=historic-gpu&status=active').json()['total'] == 0
+    assert client.get('/api/tasks?gpu=other-gpu&status=finished').json()['total'] == 0
+
+
+@pytest.mark.parametrize('known_end', [True, False])
+def test_finished_task_api_does_not_keep_counting(client, app, monkeypatch, known_end):
+    from datetime import datetime, timedelta, timezone
+
+    login(client)
+    start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    now = start + timedelta(hours=1)
+    monkeypatch.setattr('gpupm.api.context.utcnow', lambda: now)
+    original = app.state.ctx.agent.call
+
+    def call(method, *args, **kwargs):
+        value = original(method, *args, **kwargs)
+        if method == 'snapshot':
+            task = value['tasks'][0]
+            task.update(status='finished', members=[], started_at=start.isoformat(),
+                        max_runtime_seconds=300,
+                        finished_at=(start + timedelta(seconds=300)).isoformat() if known_end else None)
+        return value
+
+    app.state.ctx.agent.call = call
+    app.state.ctx.invalidate()
+    task = client.get('/api/tasks?status=finished').json()['items'][0]
+    assert task['runtime_seconds'] == (300 if known_end else None)
+    assert task['remaining_seconds'] is None
+    assert task['overdue'] is False

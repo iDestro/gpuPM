@@ -1,5 +1,7 @@
 # wzx-ubuntu 试用部署
 
+> 当前验收结论见 [ACCEPTANCE_STATUS.md](ACCEPTANCE_STATUS.md)。本文件保留历史记录；早期待办和失败应结合后续结果阅读。
+
 2026-10-14 已启用，后端功能基于 f3ce9bd，前端为当前 dashboard 整改版本。三个 systemd 服务已设为开机启动：gpupm-trial-agent、gpupm-trial-api、gpupm-trial-demo。普通 Web 服务使用独立无登录系统账号 gpupm-trial；root agent 配置 allow_mutations=false。
 
 - 真实服务器：127.0.0.1:18000，显示 host 来源；读取真实 GPU、任务及账号。原生账号/文件/配额/任务终止操作被禁止。业务备注、优先级等 Web 元数据可以保存。
@@ -128,3 +130,119 @@ Ubuntu228项后端、70项前端、14条Chrome E2E及构建/类型检查通过�
 Ubuntu 269 项后端通过；前端全量 77 项及补充后的 8 项权限组专项、17 条 Chrome 全流程、增强的权限组编辑及操作列可视回归、构建和 Ruff 通过。两入口实机中英文、搜索、默认/其他视图和 375px 检查通过，写请求为 0、全局设置未变；真实 passwd/group 文件校验值与升级前相同。账号密码及端口保持原设置。
 
 本机截图：.runtime/preview/permission-groups-managed-18000.png、permission-groups-other-18000.png、permission-groups-en-18000.png、permission-groups-mobile-18000.png；演示环境对应端口 18001。截图及检查脚本不入版本库。
+
+### 2026-10-15 管理写权限已开启
+
+按用户明确授权，将 `/var/lib/gpupm-trial/agent.json` 中 `allow_mutations` 改为 `true`，重启 `gpupm-trial-agent`。本节取代前文关于当前只读状态的说明；历史验证记录不变。维护保护名单仍为 `wuzhaoxiang`。配置备份：`/var/lib/gpupm-trial/agent.before-enable-writes-1791995726342960154.json`（root 0600）。
+
+开启前只读核验：无待协调的受管账号登录限制，无运行中的未保护自动终止任务策略。开启后三服务 active，Web health 正常；未执行账号变更或任务终止，passwd/group 哈希不变。
+
+已知接管条件：`luwangxing` 的实际主目录 `/home/luwangxing` 与当前 `home_base=/var/lib/gpupm-qa/home` 不匹配，且预期数据目录 `/var/lib/gpupm-qa/data/luwangxing` 不存在，因此该账号仍不能直接接管。尚未迁移文件、改变目录配置或创建其数据目录；正式目录规划需另行处理。
+
+### 2026-10-15 手动验证账号
+
+按用户授权通过 `/api/system-users` 创建 `gpu_trial`，UID 1018 / GID 1028，私有主组 `gpu_trial`、附属组 `human`，managed=true、is_human=true、protected=false，Shell `/bin/bash`。主目录 `/var/lib/gpupm-qa/home/gpu_trial`，数据目录 `/var/lib/gpupm-qa/data/gpu_trial`，均核验为 UID 1018 所有及 0700。临时密码通过平台专用密码接口设置，首次登录需改密；凭据不写入仓库。
+
+实机创建暴露了初始化顺序错误：通用 Shell 更新提前解除 nologin，随后 apply_login 将其误判为外部策略修改。修复为 agent_restricted 时由 apply_login 在完整校验后统一恢复 Shell 与有效期；保留所有外部限制检查。新增创建全流程回归先复现错误再通过，Ubuntu 后端 270 项测试通过，Ruff 通过。已部署 accounts.py。
+
+首次部分创建保持密码锁定和账号过期；停 agent 后校验该新账号的 UID、目录、基线密码匹配、过期值，恢复仅由本次流程提前改变的临时 Shell，再由 agent 自身恢复登录策略。之后通过平台预览及密码接口完成初始化，状态 active / login_policy_status=applied。备份 `/var/lib/gpupm-trial/backup-account-create-fix-1791996291703229197`。未修改既有用户，未代用户完成首次 SSH 改密登录。
+
+## 2026-10-15 当前完善版本（存储卷方案待确认）
+
+- 已更新真实版 18000 和演示版 18001；agent/API/demo 均 active，服务仍 enabled。保持 `allow_mutations=true` 和维护账号保护不变。
+- 程序与四份数据库的一致性备份：`/var/lib/gpupm-trial/backup-readiness-1791998569834681088`。其中 `release-acceptance.json` 记录旧版→新版→旧版、备份恢复的隔离数据库验证，结果通过；本次并未回退实际 Linux 账号。
+- Ubuntu 最终后端测试 319 项通过。最终前端静态资源 `index-CtDFA_t5.js` / `index-CDh1to1P.css`，构建通过。
+- 真实/演示网页均通过详情链接、刷新、中英文、375px 手机布局检查；浏览器无 pageerror，检查阶段无业务写入。
+- 本实例 ACL 验收通过 13 项：`/var/lib/gpupm-trial/native-acl-readiness-1791998569.json`。测试账号已软删除，文件和明确命名的 QA 共享项目保留；原有 `gpu_trial` 未修改。
+- **存储仍未完成切换**：服务器只有一块系统盘，当前 `/` ext4 约 470GiB 可用，尚无 `/data`，用户配额未开启。正在等待专用文件卷、系统目录或新增磁盘的方案选择；未格式化、重新分区、重挂载根分区或迁移老账号目录。
+- SSH 首次改密实机矩阵仍在排查验收脚本交互，不能根据早期失败报告宣称通过。
+
+### 同轮 SSH 验收结论
+
+SSH/PAM 最终 **24/24** 通过，报告 `/var/lib/gpupm-trial/native-ssh-readiness-v4-1791998569.json`；此前超时为验收脚本未识别服务器中文 PAM 提示，已经修正。当前剩余阻塞仅为数据卷方案选择与之后的实际配额配置/验收，不能把 ACL/SSH 通过视为数据卷已完成。
+
+### 单实例启动顺序收尾
+
+agent 现在在获得独占锁后才初始化数据库，避免重复启动先运行恢复逻辑。备份 `/var/lib/gpupm-trial/backup-singleton-1791999380667280977`，Ubuntu 相关3项测试和真实持锁检查通过。已部署并重启 agent，三项服务均 active。冻结前端源码后完整94项测试通过。存储方案仍待选择，目录与挂载未变更。
+
+## 2026-10-15 09:18（Asia/Shanghai）系统盘数据目录已配置
+
+用户确认直接使用系统盘 /data，配额需要根文件系统修改或重启时留待维护窗口。
+
+- 当前新账号路径：`/home/<用户名>`、`/data/<用户名>`；共享根 `/data/shared`。根目录 root:root 0755，账号私有目录0700。API设置读取与agent配置一致。
+- 稳定设备锚点 `/dev/disk/by-uuid/78832381-a1a2-47f1-aac0-de8a98a78a52`；agent 的systemd drop-in增加RequiresMountsFor，API drop-in同步目录环境变量。
+- 备份 `/var/lib/gpupm-trial/backup-storage-roots-1792027081593693188`。已有账号信息与48个记录目录身份/权限保持原位；gpu_trial仍沿用原QA目录，不做迁移。
+- 重启agent/API后健康检查通过；新根目录实际ACL13项、SSH/PAM/隔离24项通过。测试账号已软删除，文件保留。
+- 未修改根文件系统特性、挂载参数或fstab，未分配文件卷，未重启整机。配额尚未启用且维护窗口尚未预约，详见 STORAGE_SETUP_PENDING.md 的现行配置和维护说明。
+
+## 2026-10-15: remove disk quotas
+
+Deployed user-requested removal of quota controls and enforcement APIs while retaining usage, capacity alerts and shared ACLs. Backup: `/var/lib/gpupm-trial/backup-remove-quotas-1792029699698874711`. Configuration, passwd/group and shared ACLs unchanged. Three services active; host/demo UI verified in both languages and mobile layout. No server reboot or filesystem adjustment. The previous quota maintenance window is cancelled; see [current acceptance](ACCEPTANCE_STATUS.md).
+
+## 2026-10-15 存储/共享专项体验部署
+
+新版存储与共享页面、严格ACL读回及失败处理已部署。主备份 `backup-storage-experience-1792031368302101701`，前端布局备份 `backup-storage-layout-1792031579317565714`，均在 `/var/lib/gpupm-trial/`。实际ACL13项和双入口桌面/手机宽度/中英文验证通过；未重启主机。详情见 [当前验收](ACCEPTANCE_STATUS.md)。
+
+### 目录统计按需刷新（2026-10-15）
+
+自动存储采集仅读取文件系统容量与 inode；页面 GET 不再发起目录遍历。管理员通过 POST /api/storage/refresh 手动刷新目录用量，沿用登录、CSRF 和操作审计。无需服务器重启或修改挂载配置。文件数展示与目录条目计数已移除。手动刷新仍有磁盘 I/O 成本。
+
+### 共享目录按成员授权（2026-10-15）
+
+已部署成员列表、只读/读写及移除授权；不再要求管理员选择 Linux 组。每个项目由后台维护专用组，组名/GID/所有权记录受保护。普通权限组及账号编辑不会改变这些内部授权。
+
+最终备份 `/var/lib/gpupm-trial/backup-share-members-1792043343619963582`（此前备份 `backup-share-members-1792042755500700375`）。系统配置保持不变，原账号及共享 ACL 在部署期间不改动。原生验收报告 `/var/lib/gpupm-trial/native-share-members-20261015.json`：18 项通过、fixture 清理无错误，新增测试账号已软删除且保留文件。
+
+旧共享目录只展示当前成员，不自动迁移；实际修改成员时经预览切换专用授权并保留旧组/子文件 ACL。旧存储路径的目录先核对路径，避免修改当前根下同名目录。
+
+旧共享目录原位置管理已修复并部署：备份 `/var/lib/gpupm-trial/backup-legacy-share-path-1792047713238652439`。此前“旧存储路径需核对后修改授权”的一般性拦截已替换为安全父路径/root 所有权/无符号链接/device+inode 校验，符合检查的已登记旧目录可直接预览与授权。真实旧路径的 gpu_trial 预览已通过，未代用户确认执行。
+
+### 2026-10-15 预览成功后误报修复
+
+备份 `/var/lib/gpupm-trial/backup-preview-lifecycle-1792050164249694445`。修复前端成功后重放旧预览、完成后倒计时继续报过期；真实过期可在对话框重新预览并保留原因。演示共享预览增加与原生一致的 revision 校验。
+
+真实服务器完整 UI 验收通过，超过原30秒有效期不再误报，QA 备注已恢复；原 gpu_trial 读写授权保持不变。前端104/后端345/Chrome20项通过。
+
+2026-10-15 已部署共享目录只读成员弹窗，备份 `/var/lib/gpupm-trial/backup-members-modal-1792052118955065117`。项目名及查看按钮打开同一弹窗，关闭图标/按钮/Esc和真实服务中英文/手机宽度验证通过。仅更新前端静态资源，无需服务或服务器重启，无业务权限变更。
+
+2026-10-15 GPU筛选修复已部署，完整源代码/静态资源/四个SQLite数据库备份 `/var/lib/gpupm-trial/backup-task-filters-1792055678417087879`，兼容演练及真实/演示健康检查通过。服务更新无需服务器重启。真实gpu_trial的30秒CUDA测试结束后按设备筛选仍可查看，旧记录无设备历史时保留未知。账号、权限组及共享ACL不变。
+
+最终前端补充详情页已结束任务禁用终止，静态资源备份 `/var/lib/gpupm-trial/backup-task-filters-final-1792056267051042639`。
+
+2026-10-15 已部署结束计时冻结及systemd已确认服务leader到期终止修复。完整备份`/var/lib/gpupm-trial/backup-task-deadline-1792064341965209486`；兼容演练通过，无服务器重启。真实30秒策略测试在约33秒由平台SIGTERM正常退出，早于120秒systemd兜底，平台policy审计确认同PID signal/exited。结束后计时稳定，缺少结束记录的旧任务显示未知；到期检查仍有当前5秒采集周期及退出宽限的延迟。
+
+2026-10-16 显示名称去掉Linux前缀：本地账号/权限组（Local accounts/Permission groups），同步侧栏、页头和创建账号弹窗。仅更新静态资源，无需重启；备份`/var/lib/gpupm-trial/backup-navigation-names-1792113891444689651`。
+
+## 2026-10-16 用户组策略整合部署
+
+- wzx-ubuntu / 10.30.75.43，真实应用通过本机隧道 `http://127.0.0.1:18000` 访问；新入口 `/groups`，账号详情配置个人任务策略。
+- 部署备份：`/var/lib/gpupm-trial/backup-user-task-groups-1792159662506603011`。包含 API/agent/demo 四个数据库、应用源代码、静态资源、root配置和发布验收结果。
+- 新旧版本隔离数据库检查通过后更新 `/opt/gpupm-qa/backend/src` 和 `frontend/dist`；startup 幂等添加策略字段及内置组。三个 trial 服务均 active；宿主机 API health 为 agent=ok、mutations=true、root_readiness.ready=true。
+- `/etc/passwd`、`/etc/group`、root agent.json 与 `/data/shared` 递归 ACL 前后逐字比较一致。未重启操作系统、未迁移任何目录。
+- 旧 `/users` 重定向账号列表，旧 `/system-groups` 重定向统一用户组；原生系统权限高级页 `/advanced/system-groups` 从账号详情进入。
+- 服务器浏览器只读验收中英文、组页面、gpu_trial配置弹窗、维护账号保护、窄屏布局、取消与旧链接通过。25个人员任务快照核验通过；未修改真实用户策略作为验收数据。
+- 回滚需停三服务后同时恢复上述备份的代码和四个数据库，再按原UID/GID恢复文件权限并启动；旧版本虽能读取新增列，但无法解释新的用户组继承语义，禁止仅回滚代码。
+
+## 2026-10-17 组管理入口与批量任务分组
+
+- 已更新 wzx-ubuntu 的 API/root agent/demo 与前端，三服务 active，agent health ok；无需服务器重启，无新增数据库 schema。
+- 备份：`/var/lib/gpupm-trial/backup-group-management-1792202362516741153`（代码、前端、四个数据库、配置与发布演练结果）。沿用备份演练和失败自动回滚脚本；回滚保持代码和数据库成对恢复。
+- 前后 `/etc/passwd`、`/etc/group`、root 配置和 `/data/shared` ACL 完全一致。
+- `/groups` 为任务策略组；`/system-groups` 为系统用户组；旧 `/advanced/system-groups` 跳转后者。
+- 新接口 `POST /api/groups/{id}/members`：`members: [{uid, group_id}]`，其中 group_id 为预期原分组；管理员认证和 CSRF 沿用现有机制，最多 200 个不重复成员，一次事务审计提交。
+- 实机浏览器中文/英文/窄屏验收通过。保持原 SSH 转发入口 `http://127.0.0.1:18000`。
+
+### 2026-10-17 系统用户组成员体验更新
+
+仅部署前端 assets 与入口 HTML；先复制资产，再原子替换 index，未重启任何服务。
+备份：`/var/lib/gpupm-trial/backup-system-group-members-1792203594097505534/dist`。
+已验证 HTTP 入口与新构建一致、实机成员弹窗及中英文/手机布局正常。回滚可恢复备份 index.html（旧 hash 资产保留），无需数据库回滚。
+
+## 2026-10-17 Reliability fixes
+
+- Full backup: `/var/lib/gpupm-trial/backup-reliability-1792205502893041187` (code, frontend, four databases, root config and release rehearsal report). Three application services restarted after successful isolated new/old-code rehearsal; no OS restart or new schema.
+- Six fixes: large snapshot transfer, failed task-policy reconciliation, pending-write modal guards, conflict draft recovery, legacy account-policy eligibility, allocated directory usage. No new product features.
+- All services active; API agent=ok, mutations=true, root_readiness.ready=true. `/etc/passwd`, `/etc/group`, root config and recursive `/data/shared` ACL unchanged.
+- Installed transport verified with 4,000 long-name tasks over a private temporary socket. Live zh/en, 375px, account policy, system-group members and storage text checks passed. URL remains `http://127.0.0.1:18000`.
+- Cached directory measurements require manual refresh to adopt allocated-block accounting. Snapshot assembly retains a 64 MiB cap; larger deployments require incremental synchronization.
+- Rollback: stop application services, restore this backup's code AND four databases together, restore original UID/GID/modes, then start services. No live GPU termination or native permission mutation tests.

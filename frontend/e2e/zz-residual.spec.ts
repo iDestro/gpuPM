@@ -86,6 +86,7 @@ test('active tasks retain a waiting worker and manual residual confirmation term
   await dialog.getByLabel('终止原因',{exact:true}).fill('E2E manually confirmed residual worker');
   await dialog.getByRole('button',{name:'确认终止',exact:true}).click();
   await expect(dialog.getByText('请求已提交，以下为服务器返回结果',{exact:true})).toBeVisible();
+  await expect(dialog.locator('.ant-alert-error')).toHaveCount(0);
   await expect(dialog.getByText('成功',{exact:true})).toBeVisible();
   await dialog.getByRole('button',{name:/关\s*闭/}).click();
   await expect(page.getByRole('link',{name:'E2E residual worker',exact:true})).toHaveCount(0);

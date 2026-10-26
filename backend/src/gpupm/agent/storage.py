@@ -1,5 +1,4 @@
-import ctypes
-import errno
+import logging
 import grp
 import os
 import re
@@ -12,96 +11,26 @@ from gpupm.domain.rules import utcnow, validate_name
 from gpupm.errors import DomainError
 
 
-class Dqblk(ctypes.Structure):
-    _fields_ = [
-        (name, ctypes.c_uint64)
-        for name in (
-            "bhardlimit",
-            "bsoftlimit",
-            "curspace",
-            "ihardlimit",
-            "isoftlimit",
-            "curinodes",
-            "btime",
-            "itime",
-        )
-    ] + [("valid", ctypes.c_uint32)]
-
-
-def quota_blocks(value):
-    return (value + 1023) // 1024
-
-
-def validate_quota(policy):
-    allowed = {"filesystem_id", "soft_bytes", "hard_bytes", "soft_inodes", "hard_inodes", "grace_seconds"}
-    if set(policy) - allowed:
-        raise DomainError("invalid_quota", "unknown quota fields", 422)
-    for field in allowed - {"filesystem_id"}:
-        value = policy.get(field, 0)
-        if type(value) is not int or value < 0 or value > 2**63 - 1:
-            raise DomainError("invalid_quota", "quota values must be nonnegative native-width integers", 422)
-    for soft, hard in [("soft_bytes", "hard_bytes"), ("soft_inodes", "hard_inodes")]:
-        if policy.get(hard, 0) and policy.get(soft, 0) > policy[hard]:
-            raise DomainError("invalid_quota", "soft limit exceeds hard limit", 422)
-
-
-def native_quota(device, uid, policy=None):
-    lib = ctypes.CDLL(None, use_errno=True)
-    if not hasattr(lib, "quotactl"):
-        raise DomainError("quota_unavailable", "Linux quotactl required", 503)
-    lib.quotactl.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_void_p]
-    values = Dqblk()
-    command = 0x800007
-    if policy is not None:
-        validate_quota(policy)
-        command = 0x800008
-        values.bsoftlimit = quota_blocks(policy.get("soft_bytes", 0))
-        values.bhardlimit = quota_blocks(policy.get("hard_bytes", 0))
-        values.isoftlimit = policy.get("soft_inodes", 0)
-        values.ihardlimit = policy.get("hard_inodes", 0)
-        values.valid = 1 | 4
-        if "grace_seconds" in policy:
-            # Per-user grace timestamps use native epoch seconds, only if current usage exceeds soft limits.
-            current = native_quota(device, uid)
-            seconds = int(utcnow().timestamp()) + policy["grace_seconds"]
-            values.btime = (
-                seconds if values.bsoftlimit and current["used_bytes"] > values.bsoftlimit * 1024 else 0
-            )
-            values.itime = seconds if values.isoftlimit and current["used_inodes"] > values.isoftlimit else 0
-            values.valid |= 16 | 32
-    result = lib.quotactl(
-        ctypes.c_int((command << 8) & 0xFFFFFFFF), device.encode(), uid, ctypes.byref(values)
-    )
-    if result:
-        code = ctypes.get_errno()
-        if code in {errno.ESRCH, errno.ENOENT}:
-            name = "quota_disabled"
-            message = "user quotas are disabled; administrator must enable usrquota/uquota using the host filesystem procedure"
-        elif code in {errno.ENOSYS, errno.EOPNOTSUPP, errno.EINVAL}:
-            name = "quota_unsupported"
-            message = (
-                "filesystem or kernel does not support native user quotas; ext4/XFS user quotas required"
-            )
-        else:
-            name = "quota_unavailable"
-            message = f"quotactl failed errno {code}; root access and enabled filesystem user quotas required"
-        raise DomainError(name, message, 422)
-    if policy is not None:
-        return native_quota(device, uid)
-    return dict(
-        soft_bytes=values.bsoftlimit * 1024,
-        hard_bytes=values.bhardlimit * 1024,
-        soft_inodes=values.isoftlimit,
-        hard_inodes=values.ihardlimit,
-        used_bytes=values.curspace,
-        used_inodes=values.curinodes,
-        byte_grace_expires_at=values.btime or None,
-        inode_grace_expires_at=values.itime or None,
-        status="applied",
-        error=None,
-        grace_seconds=None,
-        grace_scope="current overage timestamps; future overages use filesystem-wide native defaults",
-    )
+def share_directory_identity(path):
+    """Pin a registered directory's identity without following symlinks."""
+    path = Path(path)
+    if not path.is_absolute() or ".." in path.parts:
+        raise DomainError("unsafe_path", "absolute registered share path required", 422)
+    try:
+        parent = open_directory(secure_directory(path.parent))
+        try:
+            fd = os.open(path.name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent)
+            try:
+                info = os.fstat(fd)
+                if info.st_uid != 0:
+                    raise DomainError("unsafe_share", "share must remain root-owned", 403)
+                return dict(path=str(path), device=info.st_dev, inode=info.st_ino)
+            finally:
+                os.close(fd)
+        finally:
+            os.close(parent)
+    except OSError as exc:
+        raise DomainError("unsafe_path", "registered shared directory missing or unsafe", 409) from exc
 
 
 def mount_unescape(value):
@@ -126,50 +55,63 @@ def filesystems():
             usage = os.statvfs(path)
         except OSError:
             continue
-        options = ",".join([parts[5], parts[separator + 3]])
-        enabled = bool(set(options.split(",")) & {"usrquota", "uquota", "quota"})
         result.append(
             dict(
                 id=path,
                 path=path,
                 device=device,
                 fstype=fstype,
+                mount_id=parts[0],
                 total=usage.f_blocks * usage.f_frsize,
                 available=usage.f_bavail * usage.f_frsize,
                 total_inodes=usage.f_files,
                 available_inodes=usage.f_favail,
-                quota_supported=True,
-                quota_enabled=enabled,
-                error=None
-                if enabled
-                else "Enable native user quotas with the filesystem administrator; no automatic remount/format is performed",
             )
         )
     return result
 
 
 def directory_usage(path):
+    """Allocated 512-byte blocks, deduplicated per root without crossing devices."""
     total = 0
-    count = 0
     errors = 0
     try:
         root = open_directory(path)
     except DomainError as exc:
-        return dict(bytes=None, files=None, status=exc.code)
+        return dict(bytes=None, status=exc.code)
+
+    root_device = os.fstat(root).st_dev
+    seen = set()
+
+    def count(info):
+        nonlocal total
+        identity = (info.st_dev, info.st_ino)
+        if info.st_dev != root_device or identity in seen:
+            return False
+        seen.add(identity)
+        total += info.st_blocks * 512
+        return True
 
     def walk(fd):
-        nonlocal total, count, errors
-        for name in os.listdir(fd):
+        nonlocal errors
+        if not count(os.fstat(fd)):
+            return
+        try:
+            names = os.listdir(fd)
+        except OSError:
+            errors += 1
+            return
+        for name in names:
             try:
                 info = os.stat(name, dir_fd=fd, follow_symlinks=False)
-                count += 1
-                if stat.S_ISREG(info.st_mode):
-                    total += info.st_size
+                if info.st_dev != root_device:
+                    continue
+                if stat.S_ISREG(info.st_mode) or stat.S_ISLNK(info.st_mode):
+                    count(info)
                 elif stat.S_ISDIR(info.st_mode):
                     child = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
                     try:
-                        if os.fstat(child).st_dev == os.fstat(root).st_dev:
-                            walk(child)
+                        walk(child)
                     finally:
                         os.close(child)
             except OSError:
@@ -179,7 +121,7 @@ def directory_usage(path):
         walk(root)
     finally:
         os.close(root)
-    return dict(bytes=total, files=count, status="partial" if errors else "available")
+    return dict(bytes=total, status="partial" if errors else "available")
 
 
 def filesystem_for(path, mounts):
@@ -189,7 +131,7 @@ def filesystem_for(path, mounts):
     return max(candidates, key=lambda fs: len(fs["path"])) if candidates else None
 
 
-def storage_alerts(mounts, users, shares, quotas, warning, critical, observations=None):
+def storage_alerts(mounts, users, shares, warning, critical, observations=None):
     alerts = []
     by_id = {fs["id"]: fs for fs in mounts}
 
@@ -250,31 +192,6 @@ def storage_alerts(mounts, users, shares, quotas, warning, critical, observation
                     user["username"] + " " + field,
                     "share of filesystem capacity; no per-directory hard limit",
                 )
-                add(
-                    "user_directory",
-                    user["account_id"] + ":" + field,
-                    "inodes",
-                    user.get(field + "_files"),
-                    fs.get("total_inodes"),
-                    user["username"] + " " + field,
-                    "directory entry count / filesystem inode capacity; hard links may duplicate counts",
-                )
-    for quota in quotas:
-        if quota.get("status") != "applied":
-            continue
-        for metric in ("bytes", "inodes"):
-            limit = quota.get("hard_" + metric) or quota.get("soft_" + metric)
-            if not limit and quota.get("used_" + metric) is not None and observations is not None:
-                observations.add(f"user_quota:{quota['account_id']}:{quota['filesystem_id']}:{metric}")
-            add(
-                "user_quota",
-                quota["account_id"] + ":" + quota["filesystem_id"],
-                metric,
-                quota.get("used_" + metric),
-                limit,
-                quota["account_id"] + " " + quota["filesystem_id"],
-                "native user quota hard limit or soft limit when unlimited hard",
-            )
     for share in shares:
         fs = filesystem_for(share["path"], mounts)
         if fs:
@@ -287,15 +204,6 @@ def storage_alerts(mounts, users, shares, quotas, warning, critical, observation
                 share["name"],
                 "share of filesystem capacity; no per-share hard limit",
             )
-            add(
-                "share",
-                share["id"],
-                "inodes",
-                share.get("usage_files"),
-                fs.get("total_inodes"),
-                share["name"],
-                "directory entry count / filesystem inode capacity; hard links may duplicate counts",
-            )
     return alerts
 
 
@@ -303,27 +211,14 @@ class Storage:
     def __init__(self, service):
         self.service = service
 
-    def filesystem(self, ident):
-        fs = next((f for f in filesystems() if f["id"] == ident), None)
-        if not fs:
-            raise DomainError("quota_unsupported", "quota target must be a discovered ext4/XFS mount", 422)
-        return fs
-
-    def quotas(self, state, account):
-        result = []
-        for fs in filesystems():
-            try:
-                quota = native_quota(fs["device"], account["uid"])
-            except DomainError as exc:
-                quota = dict(status=exc.code, error=exc.message, used_bytes=None, used_inodes=None)
-            result.append(dict(filesystem_id=fs["id"], **quota))
-        return result
-
-    def snapshot(self, state):
-        users = []
+    def snapshot(self, state, scan_directories=False):
+        cached = state.get("storage") or {}
+        users = [] if scan_directories else cached.get("users", [])
+        users = [{k: v for k, v in user.items() if k not in {"files", "home_files", "data_files"}} for user in users]
+        for share in state["shares"]:
+            share.pop("usage_files", None)
         mounts = filesystems()
-        quotas = []
-        for account in self.service.accounts.list(state):
+        for account in (self.service.accounts.list(state) if scan_directories else []):
             if not account["managed"]:
                 continue
             home = directory_usage(account["home"])
@@ -332,34 +227,25 @@ class Storage:
                 dict(
                     account_id=account["id"],
                     username=account["username"],
+                    account_status=account.get("status"),
+                    deleted_at=account.get("deleted_at"),
                     home_bytes=home["bytes"],
                     data_bytes=data["bytes"],
-                    home_files=home["files"],
-                    data_files=data["files"],
                     home_filesystem_id=(filesystem_for(account["home"], mounts) or {}).get("id"),
                     data_filesystem_id=(filesystem_for(account["data_dir"], mounts) or {}).get("id"),
-                    files=(home["files"] + data["files"])
-                    if home["files"] is not None and data["files"] is not None
-                    else None,
                     status="available" if home["status"] == data["status"] == "available" else "partial",
                     collected_at=utcnow().isoformat(),
                 )
             )
-            for fs in mounts:
-                try:
-                    quota = native_quota(fs["device"], account["uid"])
-                except DomainError as exc:
-                    quota = dict(status=exc.code, error=exc.message)
-                quotas.append(dict(account_id=account["id"], filesystem_id=fs["id"], **quota))
-        for share in state["shares"]:
+        for share in (state["shares"] if scan_directories else []):
             usage = directory_usage(share["path"])
             share["usage_bytes"] = usage["bytes"]
-            share["usage_files"] = usage["files"]
             share["usage_status"] = usage["status"]
+            share["collected_at"] = utcnow().isoformat()
         warning = state["settings"].get("warning_percent", self.service.config.get("warning_percent", 80))
         critical = state["settings"].get("critical_percent", self.service.config.get("critical_percent", 90))
         observations = set()
-        alerts = storage_alerts(mounts, users, state["shares"], quotas, warning, critical, observations)
+        alerts = storage_alerts(mounts, users, state["shares"], warning, critical, observations)
         previous = state.get("storage_alert_states", {})
         current = {a["id"]: a for a in alerts}
         for ident, alert in current.items():
@@ -371,6 +257,8 @@ class Storage:
                     state, {}, "storage.alert", ident, previous.get(ident), alert, alert["severity"]
                 )
         for ident, alert in previous.items():
+            if alert.get("metric") == "inodes" and alert.get("scope") != "filesystem":
+                continue
             if ident not in current:
                 if ident in observations:
                     self.service.event(state, {}, "storage.alert", ident, alert, None, "resolved")
@@ -387,10 +275,11 @@ class Storage:
                     current[ident] = unknown
                     alerts.append(unknown)
         state["storage_alert_states"] = current
+        acl_needs_review = any(s.get("status") == "access_recheck_required" for s in state["shares"])
         return dict(
             capabilities={
                 "acl": {
-                    "status": ("verified" if state.get("acl_verified_at") else "tools_present_unverified")
+                    "status": ("requires_attention" if acl_needs_review else "verified" if state.get("acl_verified_at") else "tools_present_unverified")
                     if shutil.which("setfacl") and shutil.which("getfacl")
                     else "unavailable",
                     "verified_at": state.get("acl_verified_at"),
@@ -405,117 +294,84 @@ class Storage:
             },
             filesystems=mounts,
             users=users,
-            quotas=quotas,
+
             shares=state["shares"],
             alerts=alerts,
             collected_at=utcnow().isoformat(),
             source="host",
+            directory_collected_at=utcnow().isoformat() if scan_directories else cached.get("directory_collected_at", cached.get("collected_at") if cached.get("users") else None),
         )
 
     def dispatch(self, state, method, p):
         service = self.service
         if method == "list_shares":
-            return state["shares"]
-        if method == "storage_snapshot":
-            interval = state["settings"].get(
-                "storage_scan_interval_seconds", service.config.get("storage_scan_interval_seconds", 900)
-            )
-            previous = state.get("storage")
-            stale = (
-                not previous
-                or (
-                    utcnow()
-                    - __import__("gpupm.domain.rules", fromlist=["parse_time"]).parse_time(
-                        previous["collected_at"]
-                    )
-                ).total_seconds()
-                >= interval
-            )
-            if stale and (service.storage_worker is None or not service.storage_worker.is_alive()):
+            from gpupm.agent.share_members import member_rows
+            groups = service.accounts.groups(state)
+            result = []
+            for share in state["shares"]:
+                row = dict(share, usage_stale=not share.get("collected_at"))
+                try:
+                    row["members"] = member_rows(share, groups)
+                except DomainError:
+                    row.update(members=None, membership_error="share_members_unavailable")
+                result.append(row)
+            return result
+        if method == "refresh_storage":
+            if service.storage_worker is None or not service.storage_worker.is_alive():
                 import threading
 
-                worker = threading.Thread(target=service.collect_storage, daemon=True)
+                service.storage_scan_error = None
+
+                def refresh():
+                    try:
+                        service.collect_storage(scan_directories=True)
+                    except Exception:
+                        logging.getLogger(__name__).exception("Directory usage collection failed")
+                        service.storage_scan_error = "目录统计失败，请重试或检查服务器日志。"
+
+                worker = threading.Thread(target=refresh, daemon=True)
                 service.storage_worker = worker
                 worker.start()
-            if previous:
-                return dict(previous, stale=stale)
-            return dict(
-                filesystems=[],
-                users=[],
-                shares=state["shares"],
-                quotas=[],
-                alerts=[],
-                collected_at=None,
-                source="host",
-                status="pending",
-                stale=True,
-                capabilities={
-                    "acl": dict(
-                        status="tools_present_unverified"
-                        if shutil.which("setfacl") and shutil.which("getfacl")
-                        else "unavailable",
-                        message="Storage background collection pending; native ACL not yet verified",
-                    )
-                },
-            )
-        if method in {"get_quotas", "preview_quota", "apply_quota"}:
-            account = service.accounts.find(state, p["id"])
-            if method == "get_quotas":
-                return self.quotas(state, account)
-            service.accounts.writable(state, p["id"])
-            policy = p["policy"]
-            validate_quota(policy)
-            fs = self.filesystem(policy["filesystem_id"])
-            current = native_quota(fs["device"], account["uid"])
-            if method == "preview_quota":
-                preview = service.preview(state, "quota", account, "update", policy)
-                preview.update(
-                    grace_scope="Current overage expiry only; future grace remains the filesystem default. No global quota grace changes.",
-                    current=current,
-                    proposed=policy,
-                    impact=dict(
-                        below_usage=bool(
-                            policy.get("hard_bytes")
-                            and policy["hard_bytes"] < current["used_bytes"]
-                            or policy.get("hard_inodes")
-                            and policy["hard_inodes"] < current["used_inodes"]
-                        )
-                    ),
-                )
-                return preview
-            service.checked(state, p, "quota", account, "update", policy)
-            result = native_quota(fs["device"], account["uid"], policy)
-            expected = dict(
-                soft_bytes=quota_blocks(policy.get("soft_bytes", 0)) * 1024,
-                hard_bytes=quota_blocks(policy.get("hard_bytes", 0)) * 1024,
-                soft_inodes=policy.get("soft_inodes", 0),
-                hard_inodes=policy.get("hard_inodes", 0),
-            )
-            if any(result[k] != v for k, v in expected.items()):
-                raise DomainError(
-                    "quota_readback_mismatch",
-                    "native quota readback differs; inspect host limits before retry",
-                    503,
-                )
-            result["filesystem_id"] = fs["id"]
-            state["quotas"][account["id"]] = result
-            state["previews"].pop(p["token"])
-            service.event(state, p, "quota.update", account["id"], current, result)
-            return result
+                service.event(state, p, "storage.refresh", "directories", None, None)
+            return dict(scanning=True)
+        if method == "storage_snapshot":
+            snapshot = self.snapshot(state, scan_directories=False)
+            return dict(snapshot, stale=False,
+                        scanning=bool(service.storage_worker and service.storage_worker.is_alive()),
+                        scan_error=getattr(service, "storage_scan_error", None))
         if method in {"preview_share_change", "execute_share_change"}:
             changes = p["changes"]
-            if set(changes) - {"name", "reader_group", "writer_group", "notes"}:
+            if set(changes) - {"name", "reader_group", "writer_group", "notes", "members"}:
                 raise DomainError("invalid_share", "arbitrary share paths prohibited", 422)
             existing = service.find(state, "shares", p["id"]) if p.get("id") else None
             merged = dict(existing or {})
             merged.update(changes)
             name = validate_name(merged["name"])
+            member_groups = None
+            member_scope = None
+            if existing and existing.get("access_mode") == "members" and {"reader_group", "writer_group"} & changes.keys():
+                raise DomainError("invalid_share", "Use member permissions for this directory", 422)
+            if "members" in changes:
+                from gpupm.agent.share_members import MemberGroups, member_rows, validate_members
+                if {"reader_group", "writer_group"} & changes.keys():
+                    raise DomainError("invalid_share", "Cannot mix member and group grants", 422)
+                accounts = service.accounts.list(state)
+                desired = validate_members(changes["members"], accounts)
+                member_groups = MemberGroups(service, state, name)
+                groups = service.accounts.groups(state)
+                member_scope = dict(
+                    groups=member_groups.scope(),
+                    current=member_rows(existing, groups) if existing else [],
+                    bindings=[{k:g.get(k) for k in ("name", "gid", "members", "primary_users")} for g in groups if existing and g["name"] in {existing["reader_group"], existing["writer_group"]}],
+                    identities=[{k: a.get(k) for k in ("username", "uid", "revision", "lifecycle_id")} for a in accounts if a["username"] in {m["username"] for m in desired}],
+                )
+                merged.update(member_groups.names, members=desired, access_mode="members")
             changed_groups = [
                 merged[field]
                 for field in ("reader_group", "writer_group")
                 if not existing or merged[field] != existing[field]
             ]
-            if changed_groups:
+            if not member_groups and (changed_groups or existing and existing.get("status") == "access_recheck_required"):
                 service.accounts.validate_permission_groups(
                     state, [merged["reader_group"], merged["writer_group"]]
                 )
@@ -529,60 +385,126 @@ class Storage:
             if existing:
                 service.revision(existing, p)
             action = "update" if existing else "create"
+            path = Path(existing["path"]) if existing else Path(service.config.get("share_base", "/data/shared")) / name
+            path_scope = None
+            if existing and (member_groups or changed_groups or existing.get("status") == "access_recheck_required"):
+                if path.name != name:
+                    raise DomainError("unsafe_path", "registered shared directory name mismatch", 409)
+                path_scope = share_directory_identity(path)
             if method == "preview_share_change":
                 result = service.preview(state, "share", item, action, changes)
-                result["path"] = str(Path(service.config.get("share_base", "/data/shared")) / name)
+                result["path"] = str(path)
+                if path_scope:
+                    state["previews"][result["token"]]["path_scope"] = path_scope
+                fields = ("name", "path", "members", "notes") if member_groups else ("name", "path", "reader_group", "writer_group", "notes")
+                result["current"] = {key: existing.get(key) for key in fields} if existing else None
+                result["proposed"] = {
+                    key: merged.get(key, "") for key in fields
+                } | {"path": result["path"]}
+                if member_groups:
+                    state["previews"][result["token"]]["member_scope"] = member_scope
+                    if existing:
+                        result["current"]["members"] = member_scope["current"]
+                    result["migration"] = bool(existing and existing.get("access_mode") != "members")
                 result["impact"] = (
                     "root directory access and default ACL for new descendants; existing nested ACLs retained"
                 )
                 return result
-            service.checked(state, p, "share", item, action, changes)
-            if existing and not changed_groups:
+            checked = service.checked(state, p, "share", item, action, changes)
+            if path_scope and checked.get("path_scope") != path_scope:
+                raise DomainError("scope_changed", "Shared directory identity changed since preview", 409)
+            if member_groups and checked.get("member_scope") != member_scope:
+                raise DomainError("scope_changed", "Shared directory membership changed since preview", 409)
+            if existing and not member_groups and not changed_groups and existing.get("status") != "access_recheck_required":
                 before = dict(existing)
                 existing.update(changes)
                 existing["revision"] += 1
                 state["previews"].pop(p["token"])
                 service.event(state, p, "share.update", existing["id"], before, existing)
                 return existing
-            base = secure_directory(service.config.get("share_base", "/data/shared"))
+            base = secure_directory(path.parent)
+            service.accounts.assert_devices(
+                secure_directory(service.config.get("home_base", "/home")),
+                secure_directory(service.config.get("data_base", "/data")),
+            )
             parent = open_directory(base)
+            created = None
+            membership_touched = False
             try:
                 if not existing:
                     try:
-                        os.mkdir(name, 0o2770, dir_fd=parent)
+                        os.mkdir(name, 0o700, dir_fd=parent)
+                        created = os.stat(name, dir_fd=parent, follow_symlinks=False)
                     except FileExistsError as exc:
                         raise DomainError("path_conflict", "share path already exists") from exc
                 fd = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent)
                 try:
                     if os.fstat(fd).st_uid != 0:
                         raise DomainError("unsafe_share", "share must remain root-owned", 403)
-                    os.fchown(fd, 0, grp.getgrnam(merged["writer_group"]).gr_gid)
+                    if path_scope:
+                        info = os.fstat(fd)
+                        if (info.st_dev, info.st_ino) != (path_scope["device"], path_scope["inode"]):
+                            raise DomainError("scope_changed", "Shared directory identity changed during execution", 409)
+                    if member_groups:
+                        membership_touched = True
+                        member_groups.apply(merged["members"])
+                    reader_gid = grp.getgrnam(merged["reader_group"]).gr_gid
+                    writer_gid = grp.getgrnam(merged["writer_group"]).gr_gid
+                    os.fchown(fd, 0, writer_gid)
                     os.fchmod(fd, 0o2770)
                     # Descriptor path prevents ACL command from resolving a swapped share name.
-                    acl = f"u::rwx,g::rwx,g:{merged['reader_group']}:r-x,g:{merged['writer_group']}:rwx,m::rwx,o::---,d:u::rwx,d:g::rwx,d:g:{merged['reader_group']}:r-x,d:g:{merged['writer_group']}:rwx,d:m::rwx,d:o::---"
+                    acl = f"u::rwx,g::rwx,g:{reader_gid}:r-x,g:{writer_gid}:rwx,m::rwx,o::---,d:u::rwx,d:g::rwx,d:g:{reader_gid}:r-x,d:g:{writer_gid}:rwx,d:m::rwx,d:o::---"
                     # /proc/self/fd requires fd inheritance; invoke through pinned directory cwd instead.
                     path = f"/proc/{os.getpid()}/fd/{fd}"
                     service.accounts.run(["setfacl", "--set", acl, "--", path])
                     actual = service.accounts.run(["getfacl", "--numeric", "--absolute-names", "--", path])
-                    if not all(
-                        f"group:{grp.getgrnam(merged[g]).gr_gid}:" in actual
-                        for g in ("reader_group", "writer_group")
-                    ):
-                        raise DomainError("acl_readback_mismatch", "share ACL readback failed", 503)
+                    access_acl = {"user::rwx", "group::rwx", f"group:{reader_gid}:r-x", f"group:{writer_gid}:rwx", "mask::rwx", "other::---"}
+                    expected_acl = access_acl | {"default:" + entry for entry in access_acl}
+                    actual_acl = {line.split("#", 1)[0].strip() for line in actual.splitlines() if line.split("#", 1)[0].strip()}
+                    if actual_acl != expected_acl:
+                        raise DomainError("acl_readback_mismatch", "share ACL permissions or inheritance readback failed", 503)
+                except Exception:
+                    if created is not None:
+                        # Restrict only our pinned new directory; never delete files on a failed grant.
+                        os.fchmod(fd, 0o700)
+                    raise
                 finally:
                     os.close(fd)
+            except Exception as exc:
+                if membership_touched:
+                    member_groups.restrict_after_failure()
+                if existing:
+                    existing["status"] = "access_recheck_required"
+                    existing["revision"] += 1
+                    if state.get("storage"):
+                        state["storage"].setdefault("capabilities", {})["acl"] = {"status": "requires_attention"}
+                if created is not None:
+                    current = os.stat(name, dir_fd=parent, follow_symlinks=False)
+                    if (current.st_dev, current.st_ino) == (created.st_dev, created.st_ino):
+                        try:
+                            os.rmdir(name, dir_fd=parent)
+                        except OSError:
+                            raise DomainError("share_creation_incomplete", "New shared directory retained after failure; inspect its files and permissions before retrying", 409) from exc
+                    else:
+                        raise DomainError("share_creation_incomplete", "Shared directory identity changed; existing path was retained", 409) from exc
+                if isinstance(exc, OSError):
+                    raise DomainError("host_command_failed", "Shared filesystem operation failed; inspect permissions and preview again", 503) from exc
+                raise
             finally:
                 os.close(parent)
             state["acl_verified_at"] = utcnow().isoformat()
             if state.get("storage"):
                 state["storage"].setdefault("capabilities", {})["acl"] = {
-                    "status": "verified",
-                    "message": "Share directory ACL applied and numeric readback verified",
+                    "status": "requires_attention" if any(s is not existing and s.get("status") == "access_recheck_required" for s in state["shares"]) else "verified",
+                    "message": "Review per-project permission status and last successful ACL verification",
                     "verified_at": state["acl_verified_at"],
                 }
             if existing:
                 before = dict(existing)
                 existing.update(changes)
+                if member_groups:
+                    existing.update(member_groups.names, access_mode="members")
+                existing["status"] = "active"
                 existing["revision"] += 1
                 result = existing
             else:
@@ -598,8 +520,10 @@ class Storage:
                     notes=merged.get("notes", ""),
                     status="active",
                     revision=1,
-                    usage_bytes=0,
+                    usage_bytes=None,
                 )
+                if member_groups:
+                    result.update(access_mode="members", members=merged["members"])
                 state["shares"].append(result)
             state["previews"].pop(p["token"])
             service.event(state, p, "share." + action, result["id"], before, result)

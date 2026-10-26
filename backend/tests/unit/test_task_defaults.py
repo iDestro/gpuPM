@@ -236,7 +236,7 @@ def test_demo_seed_defaults_and_configure_restart_preserve_task_override(tmp_pat
     before = agent.call("snapshot")["tasks"]
     assert policy(before[0]) == custom
     reopened = DemoAgent(path)
-    assert reopened.call("snapshot")["tasks"] == before
+    assert [{k: v for k, v in t.items() if k != "last_seen_at"} for t in reopened.call("snapshot")["tasks"]] == [{k: v for k, v in t.items() if k != "last_seen_at"} for t in before]
     with sqlite3.connect(path) as db:
         state = json.loads(db.execute("SELECT data FROM state WHERE id=1").fetchone()[0])
     assert state["settings"]["default_task_priority"] == 99

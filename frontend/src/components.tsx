@@ -1,4 +1,5 @@
-import { useEffect, useState } from "react";
+import { ChangePreview, errorGuidance, useHostMutations } from "./readiness";
+import { type ReactNode, useEffect, useState } from "react";
 import {
   Alert,
   Button,
@@ -53,10 +54,11 @@ export function ErrorAlert({ error }: { error: unknown }) {
   const diagnostic = error instanceof Error ? error.message : String(error);
   const translated = error instanceof ApiError && error.code === "http_error" && diagnostic === `请求失败 (${error.status})`
     ? t("请求失败 ({status})", {status:error.status}) : t(diagnostic);
+  const invalidMember = error instanceof ApiError && error.code === "invalid_share_member" ? diagnostic.match(/^Invalid shared member: ([a-z][a-z0-9_-]{0,30})$/)?.[1] : undefined;
   const unknown = locale === "en-US" && translated === diagnostic && /\p{Script=Han}/u.test(diagnostic);
   return <Alert showIcon type="error"
-    message={unknown ? t("请求失败 ({code})", { code: error instanceof ApiError ? error.code : "unknown_error" }) : translated}
-    description={unknown ? <details><summary>{t("服务器诊断")}</summary><pre className="json-view">{diagnostic}</pre></details> : undefined}
+    message={invalidMember ? t("成员 {name} 当前不可授权，请在成员列表查看状态或将其移除。",{name:invalidMember}) : error instanceof ApiError && errorGuidance[error.code] ? t(errorGuidance[error.code]) : unknown ? t("请求失败 ({code})", { code: error instanceof ApiError ? error.code : "unknown_error" }) : translated}
+    description={unknown || error instanceof ApiError && !!errorGuidance[error.code] ? <details><summary>{t("服务器诊断")}</summary><pre className="json-view">{diagnostic}</pre></details> : undefined}
     style={{ marginBottom: 16 }} />;
 }
 export function JsonView({ value }: { value: unknown }) {
@@ -67,6 +69,7 @@ export function CompactText({ value, tooltip }: { value: unknown; tooltip?: stri
   return <Tooltip title={tooltip ?? text} trigger={["hover", "focus"]}><span className="compact-text" title={tooltip ?? text} tabIndex={0}>{text}</span></Tooltip>;
 }
 const statusLabels: Record<string, string> = {
+  access_recheck_required: "权限需重新验证",
   running: "运行中", finalizing: "收尾中", awaiting_cleanup: "待清理", cleaning: "清理中", finished: "已结束", overdue: "已超时", anomaly: "有异常", active: "正常", succeeded: "成功", completed: "已完成",
   success: "成功", pending: "等待中", disabled: "已停用", expired: "已到期",
   failed: "失败", failure: "失败", deleted: "已软删除", error: "错误",
@@ -134,17 +137,18 @@ export function useSave() {
       method?: string;
       body?: unknown;
     }) => api(path, method, body),
-    onSuccess: () => queryClient.invalidateQueries(),
+    // A preview is a frozen scope; replaying it after a write uses the previous revision.
+    onSuccess: () => queryClient.invalidateQueries({predicate: query => query.queryKey[0] !== "preview"}),
     retry: false,
   });
 }
 type RuntimeValue = { hours?: number | null; minutes?: number | null; seconds?: number | null };
-function runtimeSeconds(value: RuntimeValue = {}) {
+export function runtimeSeconds(value: RuntimeValue = {}) {
   return Object.values(value).every((part) => part == null)
     ? null
     : (value.hours ?? 0) * 3600 + (value.minutes ?? 0) * 60 + (value.seconds ?? 0);
 }
-function RuntimeInput({ value = {}, onChange, id, disabled, label, required, min = 1, max = 315360000 }: {
+export function RuntimeInput({ value = {}, onChange, id, disabled, label, required, min = 1, max = 315360000 }: {
   value?: RuntimeValue; onChange?: (value: RuntimeValue) => void; id?: string; disabled?: boolean; label: string; required?: boolean; min?: number; max?: number;
 }) {
   const { t } = useI18n();
@@ -177,15 +181,19 @@ function RuntimeInput({ value = {}, onChange, id, disabled, label, required, min
   </Space>;
 }
 export function EditDialog({
+  children,
   title,
   fields,
   initial = {},
+  disabledReason,
   onSave,
   onClose,
 }: {
   title: string;
   fields: Field[];
+  children?: ReactNode;
   initial?: Row;
+  disabledReason?: string;
   onSave: (values: Row) => Promise<unknown>;
   onClose: () => void;
 }) {
@@ -207,6 +215,7 @@ export function EditDialog({
     return () => window.removeEventListener("beforeunload", warn);
   }, [dirty]);
   const close = () => {
+    if (saving) return;
     if (dirty)
       modal.confirm({
         title: t("放弃尚未保存的修改？"),
@@ -217,6 +226,7 @@ export function EditDialog({
     else onClose();
   };
   const finish = async (values: Row) => {
+    if (disabledReason || saving) return;
     setSaving(true);
     setError(null);
     try {
@@ -260,7 +270,9 @@ export function EditDialog({
       title={t(title)}
       onCancel={close}
       footer={null}
-      maskClosable={!dirty}
+      maskClosable={!dirty && !saving}
+      closable={!saving}
+      keyboard={!saving}
       width={650}
       centered
       styles={{ body: { maxHeight: "calc(100dvh - 160px)", overflowY: "auto" } }}
@@ -270,6 +282,7 @@ export function EditDialog({
       <ErrorAlert error={error} />
       <Form
         form={form}
+        disabled={saving}
         layout="vertical"
         initialValues={defaults}
         onValuesChange={() => setDirty(true)}
@@ -309,6 +322,8 @@ export function EditDialog({
             ) : f.type === "select" || f.type === "tags" || f.type === "multiple" ? (
               <Select
                 allowClear
+                showSearch
+                optionFilterProp="label"
                 mode={f.type === "tags" ? "tags" : f.type === "multiple" ? "multiple" : undefined}
                 options={f.options}
                 disabled={f.disabled}
@@ -331,11 +346,12 @@ export function EditDialog({
             )}
           </Form.Item>
         ))}
+        {children}
         <Space>
-          <Button type="primary" htmlType="submit" loading={saving}>
+          <Button type="primary" htmlType="submit" disabled={!!disabledReason} title={disabledReason} loading={saving}>
             {t("保存")}
           </Button>
-          <Button onClick={close}>{t("取消")}</Button>
+          <Button disabled={saving} onClick={close}>{t("取消")}</Button>
         </Space>
       </Form>
     </Modal>
@@ -350,6 +366,7 @@ export function PreviewDialog({
   method = "POST",
   onClose,
   onDone,
+  onEdit,
   warning,
 }: {
   title: string;
@@ -360,9 +377,11 @@ export function PreviewDialog({
   method?: string;
   onClose: () => void;
   onDone?: (result: Row) => void;
+  onEdit?: () => Promise<void>;
   warning?: string;
 }) {
   const { t } = useI18n();
+  const host = useHostMutations();
   const [nonce] = useState(() => crypto.randomUUID());
   const [reason, setReason] = useState("");
   const [result, setResult] = useState<Row | null>(null);
@@ -373,22 +392,30 @@ export function PreviewDialog({
     retry: false,
     staleTime: Infinity,
     refetchOnMount: "always",
+    refetchOnReconnect: false,
+    enabled: result === null,
   });
   const mutation = useSave();
+  const [returning, setReturning] = useState(false);
+  const [returnError, setReturnError] = useState<unknown>(null);
+  const busy = mutation.isPending || returning;
+  const returnToEdit = async () => {
+    setReturning(true);
+    setReturnError(null);
+    try { await onEdit?.(); } catch (error) { setReturnError(error); } finally { setReturning(false); }
+  };
   useEffect(() => {
-    if (!preview.data?.expires_at) return;
+    if (result || !preview.data?.expires_at) return;
     const delay = new Date(preview.data.expires_at).getTime() - Date.now();
-    if (delay <= 0) {
-      setExpired(true);
-      return;
-    }
+    setExpired(delay <= 0);
+    if (delay <= 0) return;
     const timer = setInterval(
       () =>
         setExpired(Date.now() >= new Date(preview.data.expires_at).getTime()),
       1000,
     );
     return () => clearInterval(timer);
-  }, [preview.data]);
+  }, [preview.data, result]);
   const execute = async () => {
     try {
       const data = await mutation.mutateAsync({
@@ -413,17 +440,22 @@ export function PreviewDialog({
       width={760}
       centered
       styles={{ body: { maxHeight: "calc(100dvh - 240px)", overflowY: "auto" } }}
-      onCancel={onClose}
+      onCancel={() => { if (!busy) onClose(); }}
+      closable={!busy}
+      maskClosable={!busy}
+      keyboard={!busy}
       footer={
         result ? (
           <Button onClick={onClose}>{t("关闭")}</Button>
         ) : (
-          <Space>
-            <Button onClick={onClose}>{t("取消")}</Button>
+          <Space wrap>
+            <Button disabled={busy} onClick={onClose}>{t("取消")}</Button>
+            {onEdit ? <Button disabled={busy} loading={returning} onClick={returnToEdit}>{t("返回编辑并核对")}</Button> : null}
+            {expired && !mutation.error && !preview.error ? <Button loading={preview.isFetching} disabled={busy} onClick={()=>{mutation.reset();void preview.refetch();}}>{t("重新预览")}</Button> : null}
             <Button
               danger
               type="primary"
-              disabled={!preview.data?.token || !reason.trim() || expired}
+              disabled={!host.writable || !preview.data?.token || !reason.trim() || expired || preview.isFetching || !!preview.error || busy || !!mutation.error || preview.data?.adoption?.ready === false}
               loading={mutation.isPending}
               onClick={execute}
             >
@@ -433,7 +465,9 @@ export function PreviewDialog({
         )
       }
     >
-      <ErrorAlert error={preview.error || mutation.error} />
+      {!host.writable ? <Alert showIcon type="warning" message={host.reason}/> : null}
+      <ErrorAlert error={result ? null : returnError || preview.error || mutation.error} />
+      {mutation.isPending ? <Alert type="info" showIcon message={t("正在执行，请等待服务器返回结果。关闭窗口不会取消操作。")}/> : null}
       {warning ? (
         <Alert
           type="warning"
@@ -443,15 +477,15 @@ export function PreviewDialog({
         />
       ) : null}
       {preview.isPending ? <Spin /> : null}
-      {expired ? (
-        <Alert type="error" message={t("预览已过期，请关闭后重新预览")} />
+      {!result && expired ? (
+        <Alert type="error" message={t("预览已过期，请重新预览后再确认。")} />
       ) : null}
       {preview.data ? (
         <>
-          <Typography.Paragraph type="secondary">
+          {!result ? <Typography.Paragraph type="secondary">
             {t("范围由服务器核验。预览有效期：")}{date(preview.data.expires_at)}
-          </Typography.Paragraph>
-          {preview.data.targets ? (
+          </Typography.Paragraph> : null}
+          {preview.data.kind === "task" || previewPath.endsWith("/termination-preview") ? (
             <Table<Row>
               size="small"
               pagination={false}
@@ -474,7 +508,7 @@ export function PreviewDialog({
               ]}
             />
           ) : (
-            <JsonView value={preview.data} />
+            <ChangePreview data={preview.data} />
           )}{" "}
           {preview.data.excluded?.length ? (
             <>
@@ -502,6 +536,7 @@ export function PreviewDialog({
             <Input.TextArea
               aria-label={t(previewPath.endsWith("/termination-preview") ? "终止原因" : "操作原因")}
               value={reason}
+              disabled={busy}
               onChange={(e) => setReason(e.target.value)}
               rows={2}
             />

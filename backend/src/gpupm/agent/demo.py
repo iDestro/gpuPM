@@ -1,3 +1,5 @@
+from gpupm.domain.user_policy import policy_editable
+from gpupm.agent.accounts import account_change_details, lifecycle_details, validate_keys
 import copy
 import json
 import secrets
@@ -12,6 +14,7 @@ from gpupm.domain.schemas import TaskPatch, SettingsPatch
 from gpupm.domain.rules import account_status, parse_time, utcnow, validate_name
 from gpupm.domain.settings import DEFAULT_SETTINGS, task_defaults, ignored_process
 from gpupm.errors import DomainError
+from gpupm.domain.schemas import validate_business_changes
 from gpupm.agent.groups import describe_group, filter_groups, require_assignable, validate_group_change
 
 from gpupm.agent.accounts import SENSITIVE_GROUPS
@@ -178,7 +181,6 @@ class DemoAgent:
             previews={},
             idempotency={},
             events=[],
-            quotas={},
             settings=DEFAULT_SETTINGS.copy(),
             login_events=[],
         )
@@ -294,6 +296,19 @@ class DemoAgent:
             account["is_human"] = bool(
                 human and (account["gid"] == human["gid"] or account["username"] in human["members"])
             )
+            account["lifecycle"] = lifecycle_details(account)
+            account["readonly_reasons"] = [
+                code
+                for active, code in (
+                    (account.get("protected"), "protected_account"),
+                    (not account["is_human"], "non_human_readonly"),
+                    (not account.get("managed"), "unmanaged_account"),
+                    (bool(account.get("deleted_at")), "account_deleted"),
+                    (account.get("creation", {}).get("status") == "incomplete", "creation_incomplete"),
+                )
+                if active
+            ]
+            account["recovery_required"] = account.get("creation", {}).get("status") == "incomplete"
         state["system_groups"] = [
             describe_group(
                 g,
@@ -310,6 +325,10 @@ class DemoAgent:
         humans = {a["uid"] for a in state["accounts"] if a["is_human"]}
         for task in state["tasks"]:
             members = task["members"] + task.get("ignored_members", [])
+            task["gpu_uuids"] = sorted(
+                set(task.get("gpu_uuids", []))
+                | {gpu for m in members for gpu in m.get("gpu_memory", {})}
+            )
             task["ignored_members"] = [
                 m for m in members if ignored_process(m, state["settings"]["ignored_task_executables"])
             ]
@@ -345,16 +364,35 @@ class DemoAgent:
                 self.require_human(account)
                 if account["protected"] or not account["managed"]:
                     raise DomainError("protected_account", "grant only to managed ordinary accounts", 403)
+        member_changes = None
+        member_scope = None
+        member_names = None
         if method in {"preview_share_change", "execute_share_change"}:
             share = self.find(state, "shares", p["id"]) if p.get("id") else {}
-            fields = dict(share, **p.get("changes", {}))
-            names = [
-                fields[f] for f in ("reader_group", "writer_group") if not share or fields[f] != share[f]
-            ]
-            if names:
-                names = [fields["reader_group"], fields["writer_group"]]
-                require_assignable(state["system_groups"], names)
-                self.validate_group_scope(state, names)
+            if share and p.get("revision") != share["revision"]:
+                raise DomainError("revision_conflict", "configuration or membership changed", 409)
+            changes = p.get("changes", {})
+            fields = dict(share, **changes)
+            if share.get("access_mode") == "members" and {"reader_group", "writer_group"} & changes.keys():
+                raise DomainError("invalid_share", "Use member permissions for this directory", 422)
+            if "members" in changes:
+                from gpupm.agent.share_members import MemberGroups, member_rows, validate_members
+                if {"reader_group", "writer_group"} & changes.keys():
+                    raise DomainError("invalid_share", "Cannot mix members and groups", 422)
+                member_changes = validate_members(changes["members"], state["accounts"])
+                member_names = MemberGroups(None, state, validate_name(fields["name"])).names
+                owned = [g for g in state["system_groups"] if g["name"] in member_names.values()]
+                if any(g.get("share_owner") != fields["name"] for g in owned):
+                    raise DomainError("identity_conflict", "Shared directory group conflict", 409)
+                member_scope = dict(current=member_rows(share, state["system_groups"]) if share else [],
+                    identities=[{k:a.get(k) for k in ("username","uid","revision")} for a in state["accounts"] if a["username"] in {m["username"] for m in member_changes}],
+                    groups=[{k:g.get(k) for k in ("name","gid","members")} for g in owned])
+            else:
+                names = [fields[f] for f in ("reader_group", "writer_group") if not share or fields[f] != share[f]]
+                if names:
+                    names = [fields["reader_group"], fields["writer_group"]]
+                    require_assignable(state["system_groups"], names)
+                    self.validate_group_scope(state, names)
         for account in state["accounts"]:
             expired = bool(account.get("expires_on") and account["expires_on"] <= utcnow().date().isoformat())
             account["status"] = account_status(
@@ -369,7 +407,13 @@ class DemoAgent:
             self.dispatch(state, "configure", dict(settings=p.get("settings", {})))
             return {"status": "ok", "source": "demo"}
         if method == "health":
-            return dict(status="ok", source="demo", mutations=True)
+            return dict(
+                status="ok",
+                source="demo",
+                mutations=True,
+                roots=dict(home_base="/home", data_base="/data", share_base="/data/shared"),
+                root_readiness=dict(ready=True, error_code=None, source="demo"),
+            )
         if method == "snapshot":
             return dict(
                 gpus=state["gpus"],
@@ -400,7 +444,14 @@ class DemoAgent:
         if method == "list_system_groups":
             return filter_groups(state["system_groups"], p.get("scope", "managed"))
         if method == "list_shares":
-            return state["shares"]
+            from gpupm.agent.share_members import member_rows
+            result = []
+            for share in state["shares"]:
+                try:
+                    result.append(dict(share, members=member_rows(share, state["system_groups"])))
+                except DomainError:
+                    result.append(dict(share, members=None, membership_error="share_members_unavailable"))
+            return result
         if method == "apply_task_policy":
             task = self.find(state, "tasks", p["task_id"])
             self.require_human(task)
@@ -408,6 +459,9 @@ class DemoAgent:
                 raise DomainError("revision_conflict", "任务版本已经改变")
             if "is_human" in p["policy"]:
                 raise DomainError("invalid_policy", "human membership is not a policy field", 422)
+            account = next((a for a in state["accounts"] if a["uid"] == task["uid"]), None)
+            if any(task.get(k) != v for k, v in p["policy"].items()) and not policy_editable(account):
+                raise DomainError("policy_readonly", "account task policy is read-only", 403)
             TaskPatch.model_validate(dict(revision=p["revision"], **p["policy"]))
             task.update(p["policy"])
             task["revision"] += 1
@@ -427,7 +481,7 @@ class DemoAgent:
                 and m["uid"] in humans
                 and not shell_process(m)
                 and m["status"] not in {"zombie", "Z"}
-                and (m["ppid"] != 1 or residual_only or task.get("cleanup_orphans"))
+                and (m["ppid"] != 1 or m["identity"] in task.get("leader_identities", []) or residual_only or task.get("cleanup_orphans"))
             ]
             if p.get("identity"):
                 targets = [m for m in targets if m["identity"] == p["identity"]]
@@ -470,7 +524,7 @@ class DemoAgent:
                     and m["uid"] == task["uid"]
                     and not shell_process(m)
                     and m["status"] not in {"zombie", "Z"}
-                    and (m["ppid"] != 1 or preview.get("residual_only") or task.get("cleanup_orphans"))
+                    and (m["ppid"] != 1 or m["identity"] in task.get("leader_identities", []) or preview.get("residual_only") or task.get("cleanup_orphans"))
                     for m in task["members"]
                 )
                 for target in preview["targets"]
@@ -513,6 +567,7 @@ class DemoAgent:
                         raise DomainError("revision_conflict", "任务版本已经改变")
                 target = tasks[0]
                 target["members"] = [m for t in tasks for m in t["members"]]
+                target["gpu_uuids"] = sorted({gpu for t in tasks for gpu in t.get("gpu_uuids", [])})
                 target["started_at"] = min(t["started_at"] for t in tasks)
                 target["revision"] += 1
                 state["tasks"] = [t for t in state["tasks"] if t["id"] not in p["task_ids"][1:]]
@@ -530,12 +585,17 @@ class DemoAgent:
                 if not selected or len(selected) == len(task["members"]):
                     raise DomainError("invalid_split", "拆分应选择部分已确认成员")
                 new = copy.deepcopy(task)
-                new.update(id=str(uuid4()), name=task["name"] + " / split", members=selected, revision=1)
+                new["policy_parent_task_id"] = task["id"]
+                new.update(
+                    id=str(uuid4()), name=task["name"] + " / split", members=selected, revision=1,
+                    gpu_uuids=sorted({gpu for m in selected for gpu in m.get("gpu_memory", {})}),
+                )
                 task["members"] = [m for m in task["members"] if m not in selected]
                 state["tasks"].append(new)
             task["revision"] += 1
             return task
         if method == "preview_account_change":
+            business_changes = validate_business_changes(p.get("business_changes", {}))
             account = self.find(state, "accounts", p["id"])
             if not account["managed"] and p.get("changes", {}).get("managed") is not True:
                 raise DomainError("account_unmanaged", "explicit account adoption required", 403)
@@ -544,9 +604,51 @@ class DemoAgent:
                 raise DomainError("protected_account", "账号受保护", 403)
             if p["revision"] != account["revision"]:
                 raise DomainError("revision_conflict", "账号版本已经改变")
-            return self.preview(state, "account", account, p["action"], changes=p.get("changes", {}))
+            pending = account.get("creation", {}).get("status") == "incomplete"
+            if pending and p["action"] != "resume":
+                raise DomainError("creation_incomplete", "explicit creation recovery required", 409)
+            if p["action"] == "resume" and not pending:
+                raise DomainError("creation_not_pending", "account creation is not pending", 409)
+            if p["action"] == "resume" and p.get("changes"):
+                raise DomainError("credentials_in_preview", "recovery preview must have empty changes", 422)
+            result = self.preview(state, "account", account, p["action"], changes=p.get("changes", {}))
+            result["business_changes"] = business_changes
+            state["previews"][result["token"]]["business_changes"] = business_changes
+            result.update(
+                kind="account",
+                action=p["action"],
+                changes=p.get("changes", {}),
+                paths={k: account.get(k) for k in ("home", "data_dir")},
+                activity=self.dispatch(state, "account_activity", {"id": account["id"]}),
+                impact="Existing files and processes are retained; restrictions remain independent.",
+            )
+            result.update(account_change_details(account, p["action"], p.get("changes", {})))
+            if p.get("changes", {}).get("managed") is True and not account["managed"]:
+                checks = [
+                    dict(
+                        code=key + "_path",
+                        path=account.get(key),
+                        ok=account.get(key) == expected,
+                        actual=account.get(key),
+                        expected=expected,
+                    )
+                    for key, expected in (
+                        ("home", "/home/" + account["username"]),
+                        ("data_dir", "/data/" + account["username"]),
+                    )
+                ]
+                result["adoption"] = dict(
+                    ready=all(c["ok"] for c in checks),
+                    checks=checks,
+                    manual_steps=[]
+                    if all(c["ok"] for c in checks)
+                    else ["Prepare controlled private directories; demo does not migrate data."],
+                )
+            return result
         if method == "execute_account_change":
             changes = dict(p.get("changes", {}))
+            if "public_keys" in changes:
+                validate_keys(changes["public_keys"])
             if "managed" in changes and changes["managed"] is not True:
                 raise DomainError("invalid_adoption", "managed account cannot be released", 422)
             current = self.find(state, "accounts", p["id"]) if p["action"] != "create" else {}
@@ -593,6 +695,14 @@ class DemoAgent:
                     raise DomainError("identity_conflict", "current primary group GID changed", 403)
             action = p["action"]
             if action == "create":
+                profile = p.get("profile")
+                if profile is not None:
+                    from gpupm.domain.schemas import AccountProfile
+
+                    try:
+                        profile = AccountProfile.model_validate(profile).model_dump()
+                    except ValueError as exc:
+                        raise DomainError("invalid_profile", "invalid account business profile", 422) from exc
                 name = validate_name(changes["username"])
                 if any(a["username"] == name for a in state["accounts"]):
                     raise DomainError("account_exists", "账号已存在，包括软删除账号")
@@ -620,11 +730,19 @@ class DemoAgent:
                     disabled=False,
                     deleted_at=None,
                     expires_on=changes.get("expires_on"),
-                    require_password_change=changes.get("require_password_change", True),
+                    require_password_change=bool(changes.get("password"))
+                    and changes.get("require_password_change", True),
                     notes=changes.get("notes", ""),
                     revision=1,
                     public_keys=changes.get("public_keys", []),
                     login_policy_status="demo",
+                    creation=dict(
+                        status="complete",
+                        stage="initialized",
+                        profile=profile,
+                        started_at=utcnow().isoformat(),
+                        updated_at=utcnow().isoformat(),
+                    ),
                 )
                 state["accounts"].append(account)
                 human["members"].append(name)
@@ -634,6 +752,9 @@ class DemoAgent:
                     )
                 )
                 self.sync_account_groups(state, account)
+                account.update(
+                    lifecycle=lifecycle_details(account), readonly_reasons=[], recovery_required=False
+                )
                 self.event(state, p, "account.create", account["id"], None, account)
                 return account
             account = self.find(state, "accounts", p["id"])
@@ -644,6 +765,10 @@ class DemoAgent:
                 raise DomainError("revision_conflict", "账号版本已经改变")
             if action != "create":
                 preview = self.checked_preview(state, p, "account", account, action)
+                if preview.get("business_changes", {}) != validate_business_changes(
+                    p.get("business_changes", {})
+                ):
+                    raise DomainError("scope_changed", "business changes differ from preview", 409)
                 if (
                     preview["changes"] != {k: v for k, v in changes.items() if k not in {"password"}}
                     and action == "update"
@@ -652,18 +777,59 @@ class DemoAgent:
                 del state["previews"][p["token"]]
             if account.get("deleted_at") and action not in {"restore"}:
                 raise DomainError("account_deleted", "先恢复已删除账号")
+            pending = account.get("creation", {}).get("status") == "incomplete"
+            if pending and action != "resume":
+                raise DomainError("creation_incomplete", "explicit creation recovery required", 409)
+            if action == "resume":
+                if not pending:
+                    raise DomainError("creation_not_pending", "account creation is not pending", 409)
+                if not isinstance(p.get("reason"), str) or not p["reason"].strip():
+                    raise DomainError("reason_required", "recovery requires an audit reason", 422)
+                if set(changes) - {"password", "public_keys", "require_password_change"}:
+                    raise DomainError("invalid_fields", "recovery only accepts fresh credentials", 422)
+                if not changes.get("password") and not changes.get("public_keys"):
+                    raise DomainError(
+                        "credentials_required", "fresh password or SSH public key required", 422
+                    )
+                if changes.get("password") and len(changes["password"]) < 12:
+                    raise DomainError("weak_password", "password requires at least 12 characters", 422)
+            if (
+                changes.get("managed")
+                and not account["managed"]
+                and (
+                    account["home"] != "/home/" + account["username"]
+                    or account.get("data_dir") != "/data/" + account["username"]
+                )
+            ):
+                raise DomainError(
+                    "adoption_path_conflict", "resolve adoption preview checks before retrying", 409
+                )
             before = copy.deepcopy(account)
             if account["primary_group"] == account["username"]:
                 account["private_group"] = account["primary_group"]
                 account["private_gid"] = account["gid"]
             if action == "disable":
-                account["disabled"] = True
+                account.update(
+                    disabled=True, disabled_at=utcnow().isoformat(), disabled_reason=p.get("reason")
+                )
             elif action == "enable":
-                account["disabled"] = False
+                account.update(disabled=False, disabled_at=None, disabled_reason=None)
             elif action == "delete":
-                account["deleted_at"] = utcnow().isoformat()
+                account.update(deleted_at=utcnow().isoformat(), deleted_reason=p.get("reason"))
             elif action == "restore":
-                account["deleted_at"] = None
+                account.update(deleted_at=None, deleted_reason=None)
+            elif action == "resume":
+                account["creation"].update(
+                    status="complete", stage="initialized", updated_at=utcnow().isoformat()
+                )
+                account.update(
+                    public_keys=changes.get("public_keys", []),
+                    require_password_change=bool(changes.get("password"))
+                    and changes.get("require_password_change", True),
+                    recovery_required=False,
+                    login_policy_status="demo",
+                    readonly_reasons=[],
+                )
             elif action == "update":
                 if changes.get("username") and changes["username"] != account["username"]:
                     if any(t["uid"] == account["uid"] and t["status"] != "finished" for t in state["tasks"]):
@@ -717,12 +883,20 @@ class DemoAgent:
                 account["gid"] = next(
                     g["gid"] for g in state["system_groups"] if g["name"] == changes["primary_group"]
                 )
+            if "expires_on" in changes:
+                account.update(expiry_reason=p.get("reason"), expiry_set_at=utcnow().isoformat())
+            account["lifecycle"] = lifecycle_details(account)
             expired = bool(account.get("expires_on") and account["expires_on"] <= utcnow().date().isoformat())
             account["status"] = account_status(
                 deleted=bool(account["deleted_at"]), disabled=account["disabled"], expired=expired
             )
             if "groups" in changes:
                 self.sync_account_groups(state, account)
+            account["readonly_reasons"] = [
+                r for r in account.get("readonly_reasons", []) if r != "account_deleted"
+            ]
+            if account.get("deleted_at"):
+                account["readonly_reasons"].append("account_deleted")
             account["revision"] += 1
             self.event(state, p, "account." + action, account["id"], before, account)
             return account
@@ -788,6 +962,12 @@ class DemoAgent:
                     account["groups"] = sorted(memberships)
             self.event(state, p, "system_group." + p["action"], group["id"], None, group)
             return describe_group(group, state["accounts"], state["shares"])
+        if method == "refresh_storage":
+            state["directory_collected_at"] = utcnow().isoformat()
+            for share in state["shares"]:
+                share.update(collected_at=state["directory_collected_at"], usage_status="demo", usage_bytes=share.get("usage_bytes") or 0)
+            self.event(state, p, "storage.refresh", "directories", None, None)
+            return dict(scanning=False)
         if method == "storage_snapshot":
             return dict(
                 filesystems=[
@@ -797,8 +977,6 @@ class DemoAgent:
                         fstype="demo",
                         total=1024**4,
                         available=700 * 1024**3,
-                        quota_supported=True,
-                        quota_enabled=True,
                         error=None,
                     )
                 ],
@@ -806,10 +984,11 @@ class DemoAgent:
                     dict(
                         account_id=a["id"],
                         username=a["username"],
-                        home_bytes=2 * 1024**3,
-                        data_bytes=30 * 1024**3,
-                        files=1024,
-                        collected_at=utcnow().isoformat(),
+                        account_status=a.get("status"),
+                        deleted_at=a.get("deleted_at"),
+                        home_bytes=2 * 1024**3 if state.get("directory_collected_at") else None,
+                        data_bytes=30 * 1024**3 if state.get("directory_collected_at") else None,
+                        collected_at=state.get("directory_collected_at"),
                         status="demo",
                     )
                     for a in state["accounts"]
@@ -818,52 +997,9 @@ class DemoAgent:
                 alerts=[],
                 collected_at=utcnow().isoformat(),
                 source="demo",
+                directory_collected_at=state.get("directory_collected_at"),
+                scanning=False,
             )
-        if method == "get_quotas":
-            self.find(state, "accounts", p["id"])
-            return state["quotas"].get(
-                p["id"],
-                [
-                    dict(
-                        filesystem_id="demo-fs",
-                        soft_bytes=0,
-                        hard_bytes=0,
-                        soft_inodes=0,
-                        hard_inodes=0,
-                        grace_seconds=604800,
-                        used_bytes=32 * 1024**3,
-                        used_inodes=1024,
-                        status="demo",
-                        error=None,
-                    )
-                ],
-            )
-        if method == "preview_quota":
-            account = self.find(state, "accounts", p["id"])
-            self.require_human(account)
-            policy = p["policy"]
-            if policy["filesystem_id"] != "demo-fs":
-                raise DomainError("quota_unsupported", "演示文件系统仅支持 demo-fs", 422)
-            result = self.preview(state, "quota", account, "update", changes=policy)
-            result.update(
-                current={"used_bytes": 32 * 1024**3, "used_inodes": 1024},
-                proposed=policy,
-                impact="限额低于当前用量时，新写入可能被拒绝；演示不实际限制宿主机。",
-            )
-            return result
-        if method == "apply_quota":
-            account = self.find(state, "accounts", p["id"])
-            self.require_human(account)
-            preview = self.checked_preview(state, p, "quota", account, "update")
-            if preview["changes"] != p["policy"]:
-                raise DomainError("scope_changed", "预览的配额设置已改变")
-            if p["policy"]["filesystem_id"] != "demo-fs":
-                raise DomainError("quota_unsupported", "文件系统不支持配额", 422)
-            quota = dict(**p["policy"], used_bytes=32 * 1024**3, used_inodes=1024, status="demo", error=None)
-            state["quotas"][p["id"]] = [quota]
-            del state["previews"][p["token"]]
-            self.event(state, p, "quota.update", p["id"], None, quota)
-            return quota
         if method == "login_events_since":
             return dict(
                 items=state["login_events"],
@@ -871,12 +1007,42 @@ class DemoAgent:
                 coverage="演示模式：无真实登录日志",
             )
         if method == "preview_share_change":
+            changes = p.get("changes", {})
             if p.get("action") == "create":
-                name = validate_name(p["changes"]["name"])
+                name = validate_name(changes["name"])
                 candidate = dict(id="new-share:" + name, revision=1)
-                return self.preview(state, "share", candidate, "create", changes=p["changes"])
-            share = self.find(state, "shares", p["id"])
-            return self.preview(state, "share", share, "update", changes=p.get("changes", {}))
+                result = self.preview(state, "share", candidate, "create", changes=changes)
+                current = None
+                proposed = dict(changes, path="/data/shared/" + name)
+                action = "create"
+            else:
+                share = self.find(state, "shares", p["id"])
+                result = self.preview(state, "share", share, "update", changes=changes)
+                current = {
+                    key: share.get(key)
+                    for key in ("name", "path", "reader_group", "writer_group", "notes", "status")
+                }
+                current["path"] = current["path"] or "/data/shared/" + share["name"]
+                proposed = dict(current, **changes)
+                action = "update"
+            if member_changes is not None:
+                state["previews"][result["token"]]["member_scope"] = member_scope
+                if current is not None:
+                    current = {k:v for k,v in current.items() if k not in {"reader_group","writer_group"}}
+                    current["members"] = member_scope["current"]
+                proposed = {k:v for k,v in proposed.items() if k not in {"reader_group","writer_group"}}
+                proposed["members"] = member_changes
+                result["migration"] = bool(p.get("id") and share.get("access_mode") != "members")
+            result.update(
+                kind="share",
+                action=action,
+                changes=changes,
+                current=current,
+                proposed=proposed,
+                path=proposed["path"],
+                impact="Shared directory access and inheritance are simulated; user files are retained.",
+            )
+            return result
         if method == "execute_share_change":
             changes = p["changes"]
             if p.get("id"):
@@ -892,15 +1058,33 @@ class DemoAgent:
                     raise DomainError("share_exists", "共享项目已存在")
             if preview["changes"] != changes:
                 raise DomainError("scope_changed", "共享授权与预览不同")
-            if not p.get("id"):
-                require_groups([fields["reader_group"], fields["writer_group"]])
-            known = {g["name"] for g in state["system_groups"]}
-            if fields["reader_group"] not in known or fields["writer_group"] not in known:
-                raise DomainError("group_missing", "共享授权组不存在", 422)
-            if fields["reader_group"] == fields["writer_group"]:
-                raise DomainError("invalid_share", "读写组与只读组必须不同", 422)
+            if member_changes is not None:
+                if preview.get("member_scope") != member_scope:
+                    raise DomainError("scope_changed", "Directory membership changed since preview", 409)
+                for field, permission in [("reader_group", "read"), ("writer_group", "write")]:
+                    name = member_names[field]
+                    group = next((g for g in state["system_groups"] if g["name"] == name), None)
+                    if group is None:
+                        group = dict(id=name, name=name, gid=max(g["gid"] for g in state["system_groups"])+1, members=[], revision=1, managed=True, protected=True, share_owner=fields["name"])
+                        state["system_groups"].append(group)
+                    group["members"] = [m["username"] for m in member_changes if m["permission"] == permission]
+                    group["revision"] += 1
+                    for account in state["accounts"]:
+                        memberships = set(account["groups"]) - {name}
+                        if account["username"] in group["members"]:
+                            memberships.add(name)
+                        account["groups"] = sorted(memberships)
+                fields = dict(fields, **member_names, access_mode="members", members=member_changes)
+            else:
+                if not p.get("id"):
+                    require_groups([fields["reader_group"], fields["writer_group"]])
+                known = {g["name"] for g in state["system_groups"]}
+                if fields["reader_group"] not in known or fields["writer_group"] not in known:
+                    raise DomainError("group_missing", "共享授权组不存在", 422)
+                if fields["reader_group"] == fields["writer_group"]:
+                    raise DomainError("invalid_share", "读写组与只读组必须不同", 422)
             if p.get("id"):
-                share.update(changes)
+                share.update(fields if member_changes is not None else changes)
                 share["revision"] += 1
             else:
                 share = dict(
@@ -908,7 +1092,7 @@ class DemoAgent:
                     path="/data/shared/" + fields["name"],
                     status="active",
                     revision=1,
-                    usage_bytes=0,
+                    usage_bytes=None,
                     **fields,
                 )
                 state["shares"].append(share)

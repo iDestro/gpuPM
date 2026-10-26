@@ -10,7 +10,7 @@ test('all screens switch to English, remember the choice, and expose Chinese pro
   await login(page);
   await language(page,'English');
   await expect(page.getByRole('heading',{name:'Server overview',exact:true})).toBeVisible();
-  const screens=[['/tasks','GPU tasks'],['/groups','Business priority groups'],['/users','User business policies'],['/accounts','Linux local accounts'],['/system-groups','Linux permission groups'],['/storage','Storage and capacity'],['/shares','Team shared directories'],['/login-events','SSH login events'],['/settings','Policies and initialization settings'],['/audit','Operation audit']];
+  const screens=[['/tasks','GPU tasks'],['/groups','Task policy groups'],['/users','Local accounts'],['/accounts','Local accounts'],['/system-groups','System user groups'],['/storage','Storage and capacity'],['/shares','Team shared directories'],['/login-events','SSH login events'],['/settings','Policies and initialization settings'],['/audit','Operation audit']];
   for(const [path,title] of screens) {
     await page.goto(path);
     await expect(page.getByRole('heading',{name:title,exact:true})).toBeVisible();

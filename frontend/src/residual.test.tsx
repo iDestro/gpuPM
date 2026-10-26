@@ -19,25 +19,25 @@ test.each([null,0,86401])('required residual waiting duration rejects %s',async(
   expect(save).not.toHaveBeenCalled();
 });
 test('residual preview sends explicit intent and shows exact identity, runtime and exclusions without executing',async()=>{
-  const request=vi.fn(async(_url:string,_options?:RequestInit)=>new Response(JSON.stringify({token:'residual-scope',expires_at:'2099-01-01T00:00:00Z',targets:[{pid:99999,command:'python postprocess.py',identity:{pid:99999,start_ticks:7},create_time:new Date(Date.now()-600000).toISOString()}],excluded:[{identity:{pid:1},reason:'protected'}]})));
+  const request=vi.fn(async(_url:string,_options?:RequestInit)=>new Response(JSON.stringify(_url === '/api/health' ? {mutations:true,mode:'demo'} : {token:'residual-scope',expires_at:'2099-01-01T00:00:00Z',targets:[{pid:99999,command:'python postprocess.py',identity:{pid:99999,start_ticks:7},create_time:new Date(Date.now()-600000).toISOString()}],excluded:[{identity:{pid:1},reason:'protected'}]})));
   vi.stubGlobal('fetch',request);
   render(<QueryClientProvider client={queryClient}><TerminationDialog task={{id:'residual'}} residualOnly onClose={()=>{}}/></QueryClientProvider>);
   await screen.findByText('python postprocess.py');
-  expect(JSON.parse(String(request.mock.calls[0][1]?.body))).toEqual({residual_only:true});
+  expect(JSON.parse(String(request.mock.calls.find(([url])=>url.endsWith('/termination-preview'))?.[1]?.body))).toEqual({residual_only:true});
   expect(screen.getAllByRole('columnheader',{name:'运行时间'}).some(header=>header.textContent==='运行时间')).toBe(true);
   expect(screen.getByText(/0时 10分/)).toBeInTheDocument();
   expect(screen.getByText('排除的进程')).toBeInTheDocument();
   expect(screen.getByRole('button',{name:'确认终止'})).toBeDisabled();
-  expect(request).toHaveBeenCalledTimes(1);
+  expect(request.mock.calls.filter(([url])=>url.endsWith('/termination-preview'))).toHaveLength(1);
 });
 test('active list keeps all live states visible and limits residual action to fresh applied human unprotected waiting tasks',async()=>{
   const base={is_human:true,protected:false,policy_status:'applied',orphan_reminder:true,orphan_wait_seconds:300,orphan_remaining_seconds:0};
   const items=[{...base,id:'eligible',name:'eligible',status:'awaiting_cleanup'},...['finalizing','cleaning'].map(status=>({...base,id:status,name:status,status})),{...base,id:'protected',name:'protected',status:'awaiting_cleanup',protected:true},{...base,id:'other',name:'other',status:'awaiting_cleanup',is_human:false},{...base,id:'stale',name:'stale',status:'awaiting_cleanup',stale:true},{...base,id:'unapplied',name:'unapplied',status:'awaiting_cleanup',policy_status:'pending'}];
-  const request=vi.fn(async(url:string)=>new Response(JSON.stringify(url.startsWith('/api/tasks?')?{items,total:items.length,stale:false}:[])));
+  const request=vi.fn(async(url:string)=>new Response(JSON.stringify(url === '/api/health' ? {mutations:true,mode:'demo'} : url.startsWith('/api/tasks?')?{items,total:items.length,stale:false}:[])));
   vi.stubGlobal('fetch',request);
   render(<QueryClientProvider client={queryClient}><MemoryRouter><Tasks/></MemoryRouter></QueryClientProvider>);
   await screen.findByRole('link',{name:'eligible'});
-  expect(request.mock.calls[0][0]).toContain('status=active');
+  expect(request.mock.calls.find(([url])=>url.startsWith('/api/tasks?'))?.[0]).toContain('status=active');
   expect(screen.getByRole('link',{name:'finalizing'})).toBeVisible();
   expect(screen.getByRole('link',{name:'cleaning'})).toBeVisible();
   expect(screen.getAllByRole('button',{name:'终止残留进程'})).toHaveLength(1);

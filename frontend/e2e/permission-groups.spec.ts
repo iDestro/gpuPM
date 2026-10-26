@@ -3,8 +3,8 @@ import { login } from './auth';
 
 test('permission group adoption previews before changes and readonly identities stay outside grants', async ({ page }) => {
   await login(page);
-  await page.goto('/system-groups');
-  await expect(page.getByRole('heading', { name: 'Linux 权限组', exact: true })).toBeVisible();
+  await page.goto('/advanced/system-groups');
+  await expect(page.getByRole('heading', { name: '系统用户组', exact: true })).toBeVisible();
   await expect(page.getByRole('row').filter({ has: page.getByText('human', { exact: true }) })).toHaveCount(0);
   await expect(page.getByText('e2e-project-group', { exact: true })).toHaveCount(0);
   await page.getByRole('combobox', { name: '权限组范围' }).focus();
@@ -20,6 +20,7 @@ test('permission group adoption previews before changes and readonly identities 
   await page.getByLabel('操作原因').fill('browser adopt existing permission group');
   await page.getByRole('button', { name: '确认执行' }).click();
   await expect(page.getByText('请求已提交，以下为服务器返回结果')).toBeVisible();
+  await expect(page.locator('.ant-alert-error')).toHaveCount(0);
   await page.getByRole('button', { name: /关\s*闭/ }).click();
   await page.getByRole('textbox', { name: '搜索权限组' }).clear();
   const human = page.getByRole('row').filter({ has: page.getByText('human', { exact: true }) });
@@ -51,11 +52,12 @@ test('permission group adoption previews before changes and readonly identities 
   const editPreview = page.waitForRequest(request => request.url().endsWith('/change-preview') && request.method() === 'POST');
   await page.getByRole('button', { name: /保\s*存/ }).click();
   const previewBody = (await editPreview).postDataJSON();
-  expect(previewBody.changes).toEqual({ name: 'e2e-renamed-permission', members: [] });
+  expect(previewBody.changes).toEqual({ name: 'e2e-renamed-permission' });
   expect(previewBody.revision).toBeGreaterThan(0);
   await page.getByLabel('操作原因').fill('browser rename permission group');
   await page.getByRole('button', { name: '确认执行' }).click();
   await expect(page.getByText('请求已提交，以下为服务器返回结果')).toBeVisible();
+  await expect(page.locator('.ant-alert-error')).toHaveCount(0);
   await page.getByRole('button', { name: /关\s*闭/ }).click();
   await expect(page.getByText('e2e-renamed-permission', { exact: true })).toBeVisible();
   const managed = await (await page.request.get('/api/system-groups?scope=managed')).json();
@@ -80,4 +82,87 @@ test('permission group adoption previews before changes and readonly identities 
   expect(user.groups).toContain('human');
   expect(user.groups).toContain('e2e-project-group');
   expect(user.private_group).toBe('e2e-group-user');
+});
+
+test('system group member dialog adds and removes through guarded previews',async({page})=>{
+  await login(page);
+  const session=await (await page.request.get('/api/auth/me')).json();
+  const headers={'X-CSRF-Token':session.csrf_token};
+  const name=`membertest${Date.now()}`;
+  const created=await page.request.post('/api/system-groups',{headers,data:{name,members:['bob']}});
+  expect(created.ok(),await created.text()).toBeTruthy();
+  const policies=await (await page.request.get('/api/users')).json();
+  await page.goto('/system-groups');
+  await page.getByRole('button',{name,exact:true}).click();
+  let detail=page.getByRole('dialog',{name:`${name} 的成员`,exact:true});
+  await expect(detail.getByRole('link',{name:'bob',exact:true})).toBeVisible();
+  await detail.getByRole('button',{name:'添加成员'}).click();
+  const add=page.getByRole('dialog',{name:`向 ${name} 添加成员`,exact:true});
+  await expect.poll(()=>add.evaluate(el=>getComputedStyle(el).transform)).toBe('none');
+  await add.locator('.ant-select-selector').click();
+  await add.getByRole('combobox',{name:'选择成员'}).fill('alice');
+  await page.locator('.ant-select-item-option-content').filter({hasText:'alice · UID'}).click();
+  await add.locator('.ant-modal-title').click();
+  await add.getByRole('button',{name:/保\s*存/}).click();
+  const preview=page.getByRole('dialog',{name:'权限组变更预览',exact:true});
+  await expect(preview.getByRole('button',{name:'确认执行'})).toBeDisabled();
+  const groupsBefore=await (await page.request.get('/api/system-groups?scope=managed')).json();
+  expect(groupsBefore.find((g:any)=>g.name===name).members).toEqual(['bob']);
+  await preview.getByLabel('操作原因').fill('verify additive group membership');
+  await preview.getByRole('button',{name:'确认执行'}).click();
+  await expect(preview.getByText('请求已提交，以下为服务器返回结果')).toBeVisible();
+  await preview.getByRole('button',{name:/关\s*闭/}).click();
+  await expect(detail.getByRole('link',{name:'alice',exact:true})).toBeVisible();
+  await expect(detail.getByRole('link',{name:'bob',exact:true})).toBeVisible();
+  await page.setViewportSize({width:375,height:812});
+  await expect.poll(()=>page.evaluate(()=>document.documentElement.scrollWidth)).toBeLessThanOrEqual(375);
+  await expect(detail).toBeInViewport({ratio:0.5});
+  await expect.poll(()=>detail.evaluate(el=>getComputedStyle(el).transform)).toBe('none');
+  await expect(detail).not.toHaveClass(/ant-zoom/);
+  await page.screenshot({path:'test-results/system-group-members-mobile.png'});
+  await page.setViewportSize({width:1280,height:900});
+  await detail.getByRole('row').filter({has:page.getByRole('link',{name:'alice',exact:true})}).getByRole('button',{name:'移除成员'}).click();
+  await preview.getByLabel('操作原因').fill('verify member removal');
+  await preview.getByRole('button',{name:'确认执行'}).click();
+  await expect(preview.getByText('请求已提交，以下为服务器返回结果')).toBeVisible();
+  await preview.getByRole('button',{name:/关\s*闭/}).click();
+  await expect(detail.getByRole('link',{name:'alice',exact:true})).toHaveCount(0);
+  await expect(detail.getByRole('link',{name:'bob',exact:true})).toBeVisible();
+  const after=await (await page.request.get('/api/users')).json();
+  expect(after.map((u:any)=>[u.uid,u.group_id,u.personal_policy])).toEqual(policies.map((u:any)=>[u.uid,u.group_id,u.personal_policy]));
+});
+
+test('conflict returns to retained group draft and pending execution cannot be dismissed',async({page})=>{
+  await login(page);
+  const session=await (await page.request.get('/api/auth/me')).json();
+  const name=`review${Date.now()}`;
+  const created=await page.request.post('/api/system-groups',{headers:{'X-CSRF-Token':session.csrf_token},data:{name,members:[]}});
+  expect(created.ok(),await created.text()).toBeTruthy();
+  let first=true;
+  await page.route('**/api/system-groups/*/change-preview',async route=>{
+    if(first){first=false;await route.fulfill({status:409,json:{detail:{code:'revision_conflict',message:'configuration or membership changed'}}});}
+    else await route.continue();
+  });
+  await page.goto('/system-groups');
+  await page.getByRole('row').filter({has:page.getByRole('button',{name,exact:true})}).getByRole('button',{name:/编\s*辑/}).click();
+  await page.getByLabel('权限组名').fill(`${name}new`);
+  await page.getByRole('button',{name:/保\s*存/}).click();
+  await expect(page.getByText('账号或配置版本已改变，请刷新后重新预览。')).toBeVisible();
+  await page.getByRole('button',{name:'返回编辑并核对'}).click();
+  await expect(page.getByLabel('权限组名')).toHaveValue(`${name}new`);
+  await page.getByRole('button',{name:/保\s*存/}).click();
+  await expect(page.getByText(/范围由服务器核验/)).toBeVisible();
+  let release!:()=>void;
+  const gate=new Promise<void>(resolve=>{release=resolve;});
+  await page.route('**/api/system-groups/*',async route=>{
+    if(route.request().method()!=='PATCH'){await route.continue();return;}
+    const response=await route.fetch();await gate;await route.fulfill({response});
+  });
+  await page.getByLabel('操作原因').fill('verify pending write dismissal protection');
+  await page.getByRole('button',{name:'确认执行'}).click();
+  const preview=page.getByRole('dialog',{name:'权限组变更预览'});
+  await expect(preview.getByRole('button',{name:/取\s*消/})).toBeDisabled();
+  await expect(preview.getByRole('button',{name:'Close'})).toHaveCount(0);
+  await page.keyboard.press('Escape');await page.mouse.click(10,10);await expect(preview).toBeVisible();
+  release();await expect(preview.getByText('请求已提交，以下为服务器返回结果')).toBeVisible();
 });

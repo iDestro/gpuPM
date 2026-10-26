@@ -46,7 +46,7 @@ test("login coverage starts collapsed and exposes full raw JSON on demand", asyn
 
 
 test("account summary shows effective expiry and explicit soft deletion with independent disable", async () => {
-  vi.stubGlobal("fetch", vi.fn(async (url: string) => new Response(JSON.stringify(url.startsWith("/api/system-users?") ? [{id:"account",username:"sample",uid:1001,gid:1001,is_human:true,managed:true,status:"deleted",deleted_at:"2026-10-14T00:00:00Z",disabled:true,expires_effective_at:"2030-01-01T00:00:00Z"}] : []))));
+  vi.stubGlobal("fetch", vi.fn(async (url: string) => new Response(JSON.stringify(url === '/api/health' ? {mutations:true,mode:'demo'} : url.startsWith("/api/system-users?") ? [{id:"account",username:"sample",uid:1001,gid:1001,is_human:true,managed:true,status:"deleted",deleted_at:"2026-10-14T00:00:00Z",disabled:true,expires_effective_at:"2030-01-01T00:00:00Z"}] : []))));
   render(<QueryClientProvider client={queryClient}><MemoryRouter><Accounts /></MemoryRouter></QueryClientProvider>);
   expect(await screen.findByText("2030-01-01")).toBeInTheDocument();
   expect(screen.getByText("已软删除", {selector:".status-tag"})).toBeInTheDocument();

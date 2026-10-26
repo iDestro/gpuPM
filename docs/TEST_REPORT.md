@@ -1,5 +1,7 @@
 # 第一版测试报告
 
+> 当前验收结论见 [ACCEPTANCE_STATUS.md](ACCEPTANCE_STATUS.md)。本文件保留历史记录；早期待办和失败应结合后续结果阅读。
+
 日期：2026-10-14。测试代码位于 backend/tests、frontend/src/*test.tsx、frontend/e2e 和 scripts。结果对应当前功能分支；这是实现和核心实机验收记录，不是所有故障组合或生产上线认证。
 
 ## 环境与结果
@@ -191,3 +193,246 @@ Ubuntu后端全量228项通过，Ruff通过。新增回归覆盖默认/旧配置
 - /etc/passwd 与 /etc/group 的 SHA-256 升级前后相同，三服务 active，原生写能力保持关闭。
 
 未对真实 Linux 账号、组成员或 ACL 执行写入验收，也未测试其他浏览器。旧管理记录缺少历史 GID 时，只能在首次观察时绑定，不能追溯判断此前发生的组重建，正式启用写能力前仍须核对旧记录身份。
+
+## 2026-10-15 当前实例原生验收脚本（执行计划）
+
+本节记录可执行验收方法，不代表已在服务器通过。使用现有运行中 agent 的 Unix socket；不启动第二个 AgentService、不复用历史 QA 用户，也不接触 gpu_trial 或其他现有账号密码。旧 `access_smoke.py`、`quota_smoke.py`、`key_expiry_smoke.py` 是历史隔离验收工具，不用于本轮当前实例验收。
+
+在仓库根目录，用服务器已安装项目依赖的 Python 执行（将 `/path/to/python` 替换为部署虚拟环境 Python）：
+
+```sh
+sudo env PYTHONPATH=backend/src /path/to/python scripts/native_ssh_acceptance.py --socket /run/gpupm-trial/agent.sock --output /root/gpupm-ssh-evidence.json
+sudo env PYTHONPATH=backend/src /path/to/python scripts/native_storage_acceptance.py --socket /run/gpupm-trial/agent.sock --checks acl --output /root/gpupm-acl-evidence.json
+sudo env PYTHONPATH=backend/src /path/to/python scripts/native_storage_acceptance.py --socket /run/gpupm-trial/agent.sock --checks quota --mount /actual/prepared/mount --output /root/gpupm-quota-evidence.json
+```
+
+- 先由管理员核实并配置真实新账号 home/data/share 根目录及配额卷；`--mount` 必须是已存在的 ext4/XFS **精确挂载点**，且 root 所有、不可由普通用户改写。脚本不执行格式化、挂载、重挂载、重启或旧目录迁移。配额未启用时失败，不降级为模拟通过。
+- SSH 只连本机 `127.0.0.1`，可指定 `--port`。客户端忽略用户 SSH 配置及现有私钥，临时 known_hosts 对本机首次连接使用 accept-new。需要 OpenSSH 客户端/服务端及可用的密码与公钥认证。脚本设置 `LC_ALL=C` 并通过 `SendEnv=LC_ALL` 请求服务端使用英文；服务端不接受该变量时也支持中文 PAM 当前/新/确认密码提示及成功消息，其他未识别提示将带脱敏诊断安全失败。
+- SSH 使用两个唯一临时账号，分别通过密码、公钥交互登录完成首次改密。每个账号改密前验证两种认证的非交互命令和 SFTP 被拒绝；改密后验证两种认证的命令、SFTP、umask 077，旧密码失效和私人目录 0700/跨用户拒绝。PTY 有 45 秒截止时间，普通子进程 30 秒超时。
+- ACL 使用当前实例创建的三个账号、两个受管项目组和共享目录。验证 writer 新建嵌套目录/文件及写入、reader 继承读取但不可写、outsider 拒绝、撤销 reader 组成员后的新进程失去访问，以及私人 home/data 隔离。既有运行进程的补充组不会被脚本强制刷新或终止。
+- 配额使用独立新 UID，在指定挂载点创建唯一 0700 测试目录，通过 agent 预览/提交策略，直接只读 quotactl 与 agent 回读交叉验证。分别验证字节及 inode 的软限制宽限、当前超额的 3 秒期限及到期后在硬限制以下拒绝写入，最后验证硬限制。单次写入最多 1 MiB，只创建少量文件；不会修改文件系统全局 grace。结束时清除此新 UID 的测试配额。
+- 成功或失败均尝试通过 agent **软删除本次账号**，保留账号目录、数据和共享测试文件。项目组/共享记录也保留用于审计。私钥、askpass 和 known_hosts 位于 0700 临时目录，退出时移除。不会打印密码、私钥、原始 PTY 转录或原始命令错误；SSH 失败诊断仅保留去除凭据及终端控制字符后的有界尾部、提示阶段计数及退出/超时原因。初始 SSH 拒绝必须包含密码过期证据；SFTP 使用 DEBUG1 验证对应认证方式已经成功且未返回工作目录，并要求紧邻的同账号同认证方式 SSH 已确认密码过期。单独连接关闭、连接失败和普通认证失败不算通过；JSON 包含检查名、实际账号路径、保留资源和清理错误，`--output` 以 0600 新建且拒绝覆盖。
+- 若进程被 SIGKILL、断电或 agent 不可用，finally 无法保证完成；检查 JSON 的 `requested_fixture_names` / `cleanup_errors`，只对该次明确列出的 QA 身份做受控软删除。不得按前缀批量操作其他历史账号。
+
+无需 root、网络、SSH 或 quota 的离线脚本自检：
+
+```sh
+PYTHONPATH=backend/src:scripts backend/.venv/bin/python -m unittest scripts/test_native_acceptance.py
+```
+
+该自检验证完整/分段 PAM 提示、真实本地 PTY 交互成功与失败、密码预览脱敏、身份变更拒绝、清理范围、错误报告脱敏、配额短写后继续探测 EDQUOT，以及只读用户不得修改既有文件；不能替代上述服务器验收。
+
+## 2026-10-15 专用工具完善：集成阶段
+
+- 账号创建采用持久化恢复记录；在用户、目录、凭据和登录释放步骤注入中断，核验身份/目录锚点、凭据不落预览、完整初始化前不开放登录。仅公钥恢复不强制不可完成的密码更新。
+- 健康接口公开真实写入能力和初始化核验结果。配置页目录来自 agent；agent 不可用时，已有快照标记过期而非伪造可写状态。
+- 变更预览显示修改前后；账号限制、恢复入口及操作错误使用结构化中英文提示。
+- 首轮前端全量：89 通过、2 个测试入口缺少 QueryClientProvider；修正对应真实应用入口后，相关文件 5 项通过。浏览器完整 19 项通过；最终 UI 修订后相关 11 项再次通过。构建通过。
+- 首轮 Ubuntu 后端：305 通过、1 个旧健康接口精确断言失败；更新新增字段断言后，相关 Linux socket/进程测试 2 项通过。最终集成全量结果待下方追加。
+- 新存储守卫测试确认：挂载设备/类型/mount ID 改变后，旧配额预览不能执行；共享目录写入前核验配置设备。
+- 原生验收脚本离线自检 12 项通过。原生 SSH、ACL、配额实机结果必须另行记录，不能用本段离线结果替代。
+- 升级验收工具仅在私有数据库副本上演练前版/新版/回退读取和初始化、持久配置保留及备份恢复；明确不宣称整机重启、原生账号回退或依赖包升级已验证。
+
+### 实机集成结果补充
+
+- Ubuntu 最终完整后端回归：**319 passed / 32.52s**（包括 Linux socket/进程以及隔离备份恢复测试）。
+- 最终前端回归 92 通过，2 个断言/运行期间翻译改动问题；冻结源文件后完整 `app-i18n` 与 `components-i18n` 两文件 **11/11** 通过，保留原始错误诊断检查。最终构建通过。完整浏览器 19/19、后续相关 11/11 通过；部署后真实/演示网页只读验收均通过。
+- 隔离数据库升级/回退/恢复：使用本次停服务期间备份，原始备份逻辑内容不变、恢复一致、持久业务/账号/组/策略数据保留，`release_rehearsal=true`。报告见部署备份目录。
+- 当前实例 ACL **13/13** 通过，包含只读成员不能改写既有文件、撤权后的新进程不可访问、0700 目录隔离。测试账号软删除且文件保留。
+- SSH 首次改密矩阵未完成，早期超时及 SFTP 缺少明确诊断不计通过；原生配额当前实例仍待准备数据卷，不以离线测试代替。
+
+### SSH/PAM 最终实机结果
+
+- 首次超时定位为验收脚本只识别英文，而服务器 PAM 输出“当前的密码：”。应用认证、强制改密限制均正常；只修改验收脚本的语言传递和中英文提示解析。
+- 修正后实机 **24/24** 通过：密码和公钥两种交互入口，各自验证首次改密前命令/SFTP受限、改密后密码/公钥命令与SFTP可用、umask077、旧密码失效，以及主/数据目录0700和跨用户访问拒绝。
+- SFTP受限证据要求已成功以指定方式认证、同账号同方式 SSH 明确提示密码到期、SFTP无目录结果且失败；单独“连接关闭”不算通过。
+- 最终报告：`/var/lib/gpupm-trial/native-ssh-readiness-v4-1791998569.json`，清理无错误。两个最终测试账号已软删除，文件保留，既有 gpu_trial 未用于测试。
+- 验收脚本离线自检最终 **19/19**，包含分片中文UTF-8提示、凭据脱敏、短写配额检测和共享既有文件只读检查。
+
+### 续轮收尾验证（源码冻结后）
+
+- 前端完整回归：**13 个文件、94/94 项通过，161.77s**。这是前述失败断言修正后的完整结果，不再只依赖定向补测。
+- 单实例启动核查发现 `AgentService` 在获取独占锁前执行数据库恢复，已改为先获得锁再初始化。新增回归先失败后通过；Ubuntu 单实例与传输相关测试 **3/3** 通过。
+- 在真实服务已持锁的情况下，以禁止初始化存储的替身调用新启动流程，确认收到锁冲突且初始化调用次数为0，未触碰实际数据库或现有 socket。
+- 已备份并部署启动顺序修复：`/var/lib/gpupm-trial/backup-singleton-1791999380667280977`。agent 实际重启成功，agent/API/demo 均 active；健康接口正常、写入开启、目录核验通过。未做整机重启。
+- 数据卷仍无选择结果；只读复核 `/data` 不存在、根分区无 user quota。实际存储初始化及配额验收继续待定。
+
+### 2026-10-15 系统盘 /data 配置验收
+
+用户选择直接使用系统盘 /data，并将涉及根文件系统修改/重启的配额启用留待维护窗口。本轮按此明确范围执行，未创建100GiB文件卷。
+
+- agent/API 配置读取均为 home_base=/home、data_base=/data、share_base=/data/shared；UUID设备校验和服务启动依赖已配置，服务重启后健康检查通过。
+- 既有账号及48个已记录目录的身份/权限核对未变；旧数据未迁移。
+- 新根目录上的 ACL **13/13** 通过，报告 `/var/lib/gpupm-trial/native-acl-system-data-1792027081.json`。实际测试目录 `/home/gpupmqa_*`、`/data/gpupmqa_*`、`/data/shared/gpupmqa_*`。
+- 新根目录上的 SSH/PAM/私有隔离 **24/24** 通过，报告 `/var/lib/gpupm-trial/native-ssh-system-data-1792027081.json`。两组验收均无清理错误，测试账号软删除并保留文件。
+- 根 ext4 用户配额仍未启用，未执行限额/宽限期实机验收；维护窗口尚未确定，不宣称已完成启用。
+- 部署后真实网页只读验证通过：设置页显示 `/home`、`/data`、`/data/shared`，存储页显示“尚未启用”配额；无页面异常、无业务写入。
+
+### 启动修复后的完整后端回归与验收索引
+
+Ubuntu 完整后端 **320/320，32.75s** 通过，日志 `.runtime/readiness-ubuntu-post-singleton.log`。执行前后核对服务器测试副本与本地：全部 backend/src 和 backend/tests Python 文件一致；scripts/test_native_acceptance.py 存在副本差异，因此本次 pytest 不用于更新原生脚本自检结论。三个部署服务均 active。本轮没有修改运行代码、配额或用户数据。
+
+新增 [当前验收状态](ACCEPTANCE_STATUS.md)，按需求映射测试、实机证据和未验收边界；历史待办保留但明确标记为历史记录。配额继续等待用户指定维护窗口，未标记全目标完成。
+
+### 原生验收脚本副本对齐
+
+已同步服务器测试工作区的 `scripts/test_native_acceptance.py`，使用部署虚拟环境重新执行离线自检，**19/19** 通过（0.218s），日志 `.runtime/native-acceptance-selfcheck-final.log`。仅更新测试副本，不修改部署应用、真实账号或文件系统配置。当前配额启用与原生限额验收仍等待维护窗口，不能以此自检替代。
+
+## 2026-10-15: quota removal (current user-approved scope)
+
+Disk quota management and its maintenance gate are removed. Directory usage, capacity/inode alerts, private isolation and group/ACL sharing remain. Removed API/schema/RPC/native quota calls and polling; legacy quota snapshots are discarded. Tests verify removed endpoints (404/405), unsupported host RPCs, legacy snapshots and no quota requests from the account UI.
+
+- Ubuntu backend: 315 passed / 32.27s (`.runtime/quota-removal-ubuntu.log`).
+- Frontend: 13 files, 92 passed / 176.34s (`.runtime/quota-removal-frontend.log`).
+- Chrome full E2E: 19 passed / 43.9s (`.runtime/quota-removal-e2e.log`).
+- Native acceptance driver offline checks: 17 passed; obsolete quota-only checks removed, ACL/SSH helpers preserved.
+- Typecheck/build, Ruff and diff checks passed. Historical bundle-size warning remains.
+- Backup/deployment: `/var/lib/gpupm-trial/backup-remove-quotas-1792029699698874711`; isolated release rehearsal passed. Agent config, passwd/group and recursive shared-directory ACLs unchanged.
+- Actual host/demo browser checks: both 18000/18001, deep links, refresh, Chinese/English and 375px width; zero business writes, zero quota requests, zero page errors. API storage has no quota fields; OpenAPI has no quota endpoints. Three services active; root mount still `rw,relatime`.
+
+No host reboot, native quota enablement, file migration, or training termination was performed. Prior quota results are historical, not outstanding deliverables. Long-load, full hardware combinations and non-Chrome browsers remain outside the evidence established here.
+
+## 2026-10-15 存储与团队共享专项整改
+
+- 存储页改为容量卡片、结构化告警/共享用量、搜索/排序/生命周期筛选；默认未软删除账号。共享页补齐当前组成员、权限说明、路径复制、缺组引导、创建位置、搜索与采样状态；完整中英文。
+- 共享创建异常注入验证空目录可清理重试、非空文件保留并收紧访问、已有目录和替换目录不删除；ACL回读验证实际权限和默认继承；编辑失败产生需复核状态和新版本；OSError转为可审计DomainError。后台采样不持有进程控制锁。
+- Ubuntu最终全量 **323 passed / 33.30s**，`.runtime/storage-experience-ubuntu-release.log`。
+- 前端全量 **95 passed / 169.63s**，`.runtime/storage-experience-frontend.log`；相关20项再次通过，最后默认筛选/列宽调整相关3项通过。
+- Chrome全量 **20 passed / 45.2s**，`.runtime/storage-experience-e2e.log`；最后共享创建-预览确认-备注修改-刷新-中英文-375px流程再次通过。
+- 构建/类型检查、Ruff和diff检查通过。未增加依赖；原有bundle大小提示保留。
+- 当前实例原生ACL **13/13** 通过，`/var/lib/gpupm-trial/native-acl-storage-experience-20261015.json`。writer/reader/outsider访问、既有文件只读、继承、撤权后新进程及0700私人隔离通过。账号1032/1033/1034已软删除，文件保留，cleanup_errors=[]。
+- 真实18000与演示18001网页只读检查均通过：中英文、1440px/375px、搜索入口、容量显示、无默认原始JSON、成员展开、创建弹窗与取消，无业务写请求/无页面错误。首次与原生验收同时执行时冷缓存超过5秒，等待采样完成后通过；不将等待中的空统计当作零容量。
+- 截图 `.runtime/preview/storage-new-{18000,18001}.png`、`shares-new-{18000,18001}.png`及对应mobile和创建弹窗已实际查看；修正单文件系统卡片空白、固定操作列遮挡和默认历史账号干扰。
+
+完整部署备份：`/var/lib/gpupm-trial/backup-storage-experience-1792031368302101701`，布局补充备份：`/var/lib/gpupm-trial/backup-storage-layout-1792031579317565714`。数据库隔离升级/回退/恢复演练通过，配置和既有passwd/group/共享ACL一致。未重启主机，未迁移或删除原有数据。
+
+未做Safari/Firefox、真实手机及大目录压力测试；成员展示以组配置为准，既有会话/历史文件权限可不同。进程被强杀或断电留下的未知目录需管理员检查，不自动递归清理。
+
+最后异常映射补丁备份：`/var/lib/gpupm-trial/backup-share-errors-1792031772859995577`。部署后 storage.py SHA-256 与已测试本地源码一致，agent/API/demo 均 active，健康接口 status=ok、root_readiness.ready=true。
+
+### 2026-10-15 手动目录用量刷新
+
+- Ubuntu 后端全量 328 passed；最后调整未采样共享目录的未知值后，相关后端 124 passed。
+- 前端串行全量 96 passed（14 文件）；初次并行运行因超时失败，串行复跑通过。
+- Chrome 共享项目及手动刷新 E2E 1 passed，覆盖英文按钮、完成时间与 375px 布局。
+- 测试覆盖页面与定时采集不遍历目录、并发刷新去重、完成和失败重试、目录时间戳保留、登录及 CSRF。
+- 构建、Ruff、git diff --check 通过。
+- 已部署 wzx-ubuntu，备份 `/var/lib/gpupm-trial/backup-manual-storage-1792033068249608376`。隔离升级演练通过，原系统配置、账号及共享 ACL 未变。
+- 部署后真实站点只读验收与演示站点手动刷新通过，桌面/375px、中英文无页面错误；真实站点读取前后 scanning=false，目录统计时间不变。
+- 未做百万小文件压力测试，也未在验收中主动全盘扫描真实用户目录。手动扫描仍可能增加磁盘 I/O。
+
+### 2026-10-15 共享目录按成员授权
+
+- Ubuntu 后端全量 341 passed（`.runtime/share-members-ubuntu-release.log`），覆盖角色校验、去重、身份漂移、专用组冲突、降权/撤销、失败限制权限、旧组/文件保留、旧路径不误写同名目录。
+- 前端 98 passed / 15 文件（`.runtime/share-members-frontend-final.log`）。成员默认只读、读写切换、移除、中英文及无需预建组通过。早期用例点击了控件隐藏 input，已改为点击真实可见权限标签并断言选中状态。
+- Chrome 全量 20 passed，最后布局改动后共享流程 1 passed；覆盖创建→授权预览→执行→备注修改→刷新→英文→375px。
+- 当前服务器原生权限 18/18，通过实际非特权进程验证继承读写、只读拒写、撤销、升降权、内部组不可另行授权、跨项目隔离和私人目录隔离。报告 `/var/lib/gpupm-trial/native-share-members-20261015.json`。
+- 原生测试账号 1035–1037 已软删除，清理错误为空；文件与两个测试共享目录保留。
+- 构建、Ruff、git diff --check、验收脚本自测 17 项通过。已部署，备份 `/var/lib/gpupm-trial/backup-share-members-1792043343619963582`；升级演练通过。
+- 边界：已有文件 ACL 不递归覆盖，新登录生效；旧路径共享目录授权修改会在预览阶段拦截，备注仍可修改。未做大规模成员及多浏览器压力测试。
+
+### 2026-10-15 gpu_trial 共享授权错误定位与提示修复
+
+真实服务器确认 gpu_trial（UID 1018）为 active、managed、is_human，非 protected，无恢复限制。单独验证及实际共享变更预览通过；原共享名单中残留已软删除的 gpupmqa 测试账号会导致整份名单校验失败。此前泛化错误没有指出具体成员。
+
+修复：后端错误带被拒绝的用户名；界面显示具体错误成员。编辑器读取含软删除账号的状态，逐行标识，并在提交预览前明确列出不可授权成员，保留人工移除决定。
+
+回归：Ubuntu 相关后端 68 passed，前端相关 16 passed，构建/Ruff/git diff --check 通过。已备份部署，备份 `/var/lib/gpupm-trial/backup-share-member-diagnostic-1792045848019697042`。未代用户执行共享授权变更。
+
+### 2026-10-15 旧共享目录原位置授权
+
+修正此前共享根目录校验过严：已有目录按 root 端记录的路径管理，新目录仍创建于配置共享根。旧目录要求根拥有、安全父目录、逐组件禁止符号链接，预览绑定路径/device/inode，执行复核并固定目录描述符。客户端仍不能提交任意路径。不移动目录，不递归覆盖子文件 ACL。
+
+验证：Ubuntu 后端全量 344 passed；包含旧目录/当前根同名目录隔离、符号链接拒绝、预览后替换目录阻断、原文件保留。实际服务器 `/var/lib/gpupm-qa/data/shared/gpupmqa_97001781d8` 的 gpu_trial 只读授权预览通过，未执行授权。已部署，备份 `/var/lib/gpupm-trial/backup-legacy-share-path-1792047713238652439`；服务健康正常，Ruff/git diff --check 通过。
+
+### 2026-10-15 成功后版本冲突与过期误报
+
+真实审计确认 gpu_trial 在旧共享目录的读写授权已成功，revision 从 1 变为 2；错误来自成功后的自动预览重放，不是该授权失败。useSave 全量刷新触发旧版本预览请求，且完成后计时器仍显示过期。
+
+修复冻结预览的刷新范围、成功状态和倒计时，增加保留原因的显式重新预览。保留真实冲突拦截，并补齐演示后端的 revision 校验。
+
+验证：新生命周期回归 4 项先失败后通过；前端全量 104 passed，Ubuntu 后端全量 345 passed，Chrome 全量 20 passed，后端对齐后共享相关 E2E 再次通过。真实服务器旧版本相同 UI 测试复现错误，新版完整链路通过：QA 目录备注提交→超过30秒→关闭重开→恢复备注，总计2次预览/2次执行，无错误、无重复请求，gpu_trial 授权/版本未改变。截图 `.runtime/preview/preview-success-after-expiry.png`。
+
+已部署，备份 `/var/lib/gpupm-trial/backup-preview-lifecycle-1792050164249694445`，升级演练和服务健康通过。Ruff、构建、git diff --check 通过。未执行新的真实用户授权。
+
+### 2026-10-15 查看访问成员改为弹窗
+
+共享目录“查看访问成员”和项目名改为打开只读弹窗，移除表格展开行；复用现有成员信息，按最新轮询数据展示。样式采用编辑弹窗的650px居中及限定高度滚动，保留路径复制、权限提示和备注。
+
+验证：相关前端4项通过、构建/类型检查通过、Chrome共享完整流程1项通过。真实服务18000中英文/375px、项目名入口、关闭图标、关闭按钮和Esc验证通过，无业务写请求或页面错误。部署备份 `/var/lib/gpupm-trial/backup-members-modal-1792052118955065117`。演示实例18001无共享记录，线上数据验收未覆盖该空实例，演示创建/弹窗流程由E2E创建的fixture覆盖。未修改成员、权限及文件。
+
+### 2026-10-15 GPU 筛选及空结果定位
+
+复现：后端筛选只查当前 members.gpu_memory，结束清空 members 后按 GPU 查不到历史任务；前端用户框未受控，切换范围后 uid 清空但旧用户名仍显示。新增对应失败测试后修复。保留任务设备历史，统一筛选状态/勾选/分页，补充匹配数量、空态引导、错误重试、GPU 列和已结束任务终止限制，覆盖中英文。
+
+验证：相关后端127项、白名单/残留54项通过；既有相关前端17项、新增筛选/错误/结束详情4项通过；Chrome既有管理员/布局10项、新增筛选1项通过，构建/类型检查及Ruff通过。新增浏览器测试使用与既有用例一致的键盘操作Select，并等待响应式布局收敛。
+
+真实服务器：gpu_trial 运行30秒低负载CUDA验证任务，ID effed22f-c1e3-426b-b577-8f4130a705bd；结束后members为空，GPU UUID仍保留，API与网页按设备+已结束均可找到，终止按钮禁用，中英文/375px验证通过，无页面错误。截图 .runtime/preview/task-filters-native-desktop.png、task-filters-native-mobile.png。测试别名首次提交遇到初始默认策略落地的revision变化；重新读取revision后提交成功，版本保护未绕过。未修改其他任务策略及用户权限。本轮为相关回归，未重跑全平台全量测试。
+
+部署备份 /var/lib/gpupm-trial/backup-task-filters-1792055678417087879；数据库兼容演练通过，账号/权限组/共享ACL及root配置部署前后校验不变，真实/演示实例健康正常。旧任务已丢失的GPU关联无法自动补回。
+
+最终前端补充详情页已结束任务禁用终止，静态资源备份 `/var/lib/gpupm-trial/backup-task-filters-final-1792056267051042639`。
+
+### 2026-10-15 已结束计时及服务主进程到期终止
+
+根因：host/API一直用now-start计算结束任务运行时间/剩余时间；终止候选把全部PPID=1进程作为未授权孤儿排除，systemd启动的已确认leader也受影响。新增失败回归先复现实际未发送信号和结束后继续计时，再修复。共用task_timing计算时间，residual_status持久化观察结束时间；演示预览/执行与原生leader规则一致，主进程不再误标orphan。
+
+验证：相关后端197项通过，另加“例外仅限已确认leader、其他PPID1仍排除”1项通过，共198项；前端21项、Chrome任务/策略/残留7项、构建/类型检查、Ruff及git diff --check通过。保留既有残留人工清理与保护/心跳/版本安全回归，未重跑全平台全量测试。
+
+真实验收任务cc53ced0-7c67-42bf-9d45-e99c26c4eeda，gpu_trial PID554915。平台设置30秒，systemd RuntimeMaxSec仅在120秒兜底。19:39:24启动，19:39:57系统日志Deactivated successfully（未触发systemd timeout），19:39:58.271780采集确认结束，运行时长35.11178秒；平台审计actor=policy、同PID term=signaled、final=exited、job completed。后续跨多个5秒采集周期复读运行时长/finished_at完全不变、remaining_seconds为空、overdue=false。记录`.runtime/task-deadline-native-result.json`。此前5分钟历史任务无真实结束记录，运行/剩余时间为无数据，不伪造回填。测试未改其他任务策略或全局默认值。
+
+已部署备份`/var/lib/gpupm-trial/backup-task-deadline-1792064341965209486`，数据库升级兼容演练通过；部署前后系统账号/权限组、共享ACL和root配置校验不变，真实/演示健康检查通过。
+
+真实网页详情的采集确认结束时间、中英文/375px及终止按钮禁用验证通过，无页面错误；截图`.runtime/preview/task-clock-native-desktop.png`和`task-clock-native-mobile.png`。
+
+### 2026-10-16 导航名称精简
+
+本地账号和权限组去掉Linux前缀，中文/英文及相关断言同步。相关前端17项、构建与类型检查通过；真实服务中英文两个页面标题/侧栏校验通过，无页面错误。仅改显示名称，后端与权限规则未改。
+
+## 2026-10-16 用户组与任务策略继承
+
+- 用户组统一默认组、普通组和自定义组；账号详情选择分组，个人配置仅在自定义组生效，切换后保留。移除独立用户业务策略入口；原生权限组保留于账号高级功能。
+- 按字段区分继承与覆盖（包含明确不限时），解析有效值和来源。新任务持久化策略/来源/分组快照；已有任务不被后续组或全局设置覆盖。历史任务排序及个人旧配置通过审计迁移保存。
+- 修复独立复核发现的保护账号策略旁路、迁移排序、首次编辑尚未同步的新任务，以及 worker 成员变动导致误判旧任务的问题。默认组成员数与人员账号列表一致。
+- 后端全量：`uv run pytest -q`，364 passed、2 skipped（macOS 缺少 Linux SO_PEERCRED/procfs）。随后成员统计修复的 API 回归 61 passed；Ruff 通过。
+- 在 wzx-ubuntu 使用隔离临时数据库运行 Linux 专用 `test_host_transport.py`：2 passed（普通 SSH 用户执行；root 分支保护由独立单元测试覆盖）。
+- 前端全量：`npm test -- --maxWorkers=1 --testTimeout=20000`，18 files / 114 passed；最后增加的保留名称冲突显示测试另行通过（1 passed）。更新老测试的 /users、/groups mocks，异步界面断言等待上限设为5秒，未替换业务断言或使用固定等待。
+- Chrome 浏览器相关回归分批16项通过：导航、任务编辑、账号恢复、国际化、固定/折叠侧栏、移动布局、高级系统组、只读模式，以及创建组/不限时/个人分组切换与配置保留。新增流程先复现选择器与动画期尺寸断言问题，改用可访问角色、键盘选择与稳定状态断言后通过。
+- TypeScript/Vite build 与 `git diff --check` 通过。保留已有大 bundle 警告与 Ant Design InputNumber 弃用提示，本次未新增依赖。
+- 发布前对实际数据库备份进行新版/旧版隔离启动验收，通过审计校验允许的迁移差异，原生账号与共享目录数据不变。真实服务健康正常，浏览器中英文/375px验收无 pageerror。
+- 真实数据只读核验：2个组、38个人员账号；25个任务均具有策略来源和分组快照，已结束任务无倒计时，组人数与成员列表一致；gpu_trial可配置、维护账号只读。
+- 本轮未启动新的真实 GPU 任务或执行真实任务终止；不以演示流程代替完整 GPU 负载验收。已保存迁移前完整备份，回滚必须同时还原数据库与代码，不能仅回退程序文件。
+
+## 2026-10-17 任务策略组与系统用户组分离
+
+- 后端全量：367 passed，2 skipped（本机非 Linux）；Ruff 与 diff whitespace 检查通过。
+- 前端 117 项覆盖分批通过：首轮 113 passed / 4 failed；修复新增菜单位置索引遗漏、更新系统组英文标题断言、调整多选输入可见性断言后，5 个受影响文件 42/42 passed。原有任务编辑测试在并发负载下触发 10s 超时，受影响文件复测通过。
+- 浏览器：管理员原有流程 4 项、中英文 3 项、布局 6 项、系统组 1 项、只读模式 1 项、任务策略组 2 项，共 17 个不同场景分批通过。任务组流程使用独立临时服务，避免账号停用场景污染共享 demo 账号。
+- 新增断言覆盖批量原子性、原分组冲突、实时受保护账号拒绝、重复/空/非法成员、个人配置保留、已有任务快照不变、失败选择保留与取消，以及原生系统组不变。
+- 浏览器多选搜索需先等待弹窗进入动画完成；选择后点击标题收起下拉，再保存。录制追踪确认先前卡住是测试在进入动画中抢焦点或点击被下拉遮挡的按钮。
+- TypeScript/Vite 构建通过；既有大包和 Ant InputNumber 弃用提示未在本轮处理。
+- 部署后实机只读验收：3 个任务策略组、38 个人员账号；gpu_trial 可编辑，维护账号不可编辑；中文/英文、375px 布局、旧高级系统组路径跳转、成员接口空列表拒绝均通过，无 pageerror。
+- 未新增真实 GPU 终止或真实账号组成员变更试验。真实服务器仅做只读/无效请求校验；完整成员写入流程在隔离 demo 与后端测试中验证。
+
+## 2026-10-17 系统用户组成员操作优化
+
+- 前端增加独立成员弹窗、搜索、主组/附加成员区分、账号链接、增量添加和逐项移除。组名编辑不再携带成员字段，创建组仍支持初始成员。
+- 复用已有 revision/token/reason 预览执行流程；保留原成员、其他系统组和任务策略。受保护/只读/恢复中账号不会进入添加候选，主组成员不提供移除按钮。
+- 单元测试：原系统组文件 8 项通过；新增成员交互 3 项通过（等待弹窗进入动画完成后验证可见性）。
+- 浏览器：系统组原流程与新增成员流程、中英文共 5 项通过；窄屏成员弹窗另做截图与视口检查，避免动画中截图造成假空白。新增/移除确认前后状态、既有成员保留及任务策略不变均有断言。
+- TypeScript/Vite 构建和 git diff --check 通过。本轮无后端代码变更，未重复后端全量测试。
+- 实机只读验收 gpupmqa_grp_60b280：中英文、桌面与 375px 成员弹窗通过，无页面错误。未在真实服务器修改任何成员关系。
+
+## 2026-10-17 独立审查后的可靠性修复
+
+- 修复六项已确认问题：历史任务大快照分帧、失败任务策略恢复、写入中弹窗关闭、冲突后草稿恢复、旧账号策略接口资格一致性、目录实际分配空间统计。没有新增业务功能或依赖。
+- 快照保持单次采集、1 MiB 单帧上限；客户端校验顺序和完整长度后返回，64 MiB 为总上限。失败策略修改保留最后生效值；心跳核对 root 实际策略，不重放失败候选。极旧未登记任务只按观察值和 revision 做无变化登记。
+- 独立复核额外发现账号草稿跨账号残留，已将草稿绑定到具体操作；新增“冲突→返回编辑→取消→另一账号启用管理”回归。
+- 后端全量 391 passed、2 skipped（macOS 的 Linux 专用测试）；Ruff 通过。独立复核涉及账号/存储 111 项、任务通信/恢复 16 项均通过。
+- wzx-ubuntu 普通 SSH 用户通过隔离 socket 验证 4,000 条长中文名称任务、单次采集、Linux peer credentials；未使用真实 agent socket 或改变真实进程。
+- 目录用量改为 st_blocks × 512，单个扫描根按设备/inode 去重，含目录自身且不跟随符号链接、不跨设备；已有缓存需管理员手动刷新后更新。统计不是删除目录后保证可回收的容量。
+
+- Frontend: 127 distinct tests covered across runs. Initial run: 120 passed / 7 failed (6 timeouts, 1 stale account draft regression). Final affected-file rerun: 23/23 passed without raising the tests' existing timeouts. Independent review confirmed action-bound drafts.
+- Chrome: 7 passed (i18n, native group members, conflict recovery and pending-write close prevention, shared directory layout). TypeScript/Vite build and whitespace checks passed.
+- Deployment rehearsal and full backup succeeded. Installed Linux transport passed the 4,000-task isolated check again. All three services active; agent=ok, root_readiness.ready=true. Live zh/en and 375px UI checks passed, including group members, account eligibility and allocated-space text; no pageerror.
+- Native accounts/groups, shared ACL and root config unchanged. No live GPU signals, native membership mutations or directory scans were performed. Existing bundle-size and Ant InputNumber deprecation warnings remain.

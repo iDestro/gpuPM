@@ -203,10 +203,69 @@ def quality_password(password, username):
 def restriction_active(account, baseline=False):
     return bool(
         baseline
+        or account.get("creation", {}).get("status") == "incomplete"
         or account.get("disabled")
         or account.get("deleted_at")
         or (account.get("expires_on") and account["expires_on"] <= utcnow().date().isoformat())
     )
+
+
+def lifecycle_details(meta):
+    expiry = meta.get("expires_on")
+    return {
+        "disabled": dict(
+            active=bool(meta.get("disabled")),
+            at=meta.get("disabled_at"),
+            reason=meta.get("disabled_reason"),
+            source="platform",
+        ),
+        "deleted": dict(
+            active=bool(meta.get("deleted_at")),
+            at=meta.get("deleted_at"),
+            reason=meta.get("deleted_reason"),
+            source="platform",
+        ),
+        "expiry": dict(
+            active=bool(expiry and expiry <= utcnow().date().isoformat()),
+            at=expiry + "T00:00:00+00:00" if expiry else None,
+            reason=meta.get("expiry_reason"),
+            source="platform",
+        ),
+    }
+
+
+def account_change_details(account, action, changes):
+    fields = (
+        "username",
+        "uid",
+        "gid",
+        "home",
+        "data_dir",
+        "shell",
+        "groups",
+        "primary_group",
+        "disabled",
+        "deleted_at",
+        "expires_on",
+        "managed",
+        "status",
+        "login_policy_status",
+    )
+    current = {key: copy.deepcopy(account.get(key)) for key in fields}
+    proposed = {**copy.deepcopy(current), **{k: v for k, v in changes.items() if k in fields}}
+    if action in {"enable", "disable"}:
+        proposed["disabled"] = action == "disable"
+    elif action in {"delete", "restore"}:
+        proposed["deleted_at"] = "on_confirmation" if action == "delete" else None
+    elif action == "resume":
+        current["creation_status"] = "incomplete"
+        proposed["creation_status"] = "complete"
+    proposed["status"] = account_status(
+        deleted=bool(proposed.get("deleted_at")),
+        disabled=bool(proposed.get("disabled")),
+        expired=bool(proposed.get("expires_on") and proposed["expires_on"] <= utcnow().date().isoformat()),
+    )
+    return dict(current=current, proposed=proposed)
 
 
 def user_service_configuration(account, global_paths=None):
@@ -265,6 +324,7 @@ class Accounts:
         self.config = config
         self.run = executor
         self.event = event
+        self.checkpoint = lambda state: None
 
     def protected(self, entry):
         return (
@@ -273,6 +333,29 @@ class Accounts:
             or entry.pw_name in self.config.get("maintenance_users", [])
             or entry.pw_name in {"gpupm", "nobody"}
         )
+
+    def readonly_reasons(self, entry, meta):
+        reasons = []
+        for condition, code in (
+            (entry.pw_uid < 1000, "system_account"),
+            (entry.pw_uid == self.config.get("api_uid"), "api_account"),
+            (entry.pw_name in self.config.get("maintenance_users", []), "maintenance_account"),
+            (entry.pw_name in {"gpupm", "nobody"}, "reserved_account"),
+            (not self.is_human(entry.pw_uid), "non_human_readonly"),
+            (not meta.get("managed"), "unmanaged_account"),
+            (bool(meta.get("deleted_at")), "account_deleted"),
+            (meta.get("identity_conflict"), "identity_conflict"),
+            (meta.get("rename_recovery_required"), "rename_recovery_required"),
+            (meta.get("creation", {}).get("status") == "incomplete", "creation_incomplete"),
+            (not self.config.get("allow_mutations", False), "mutations_disabled"),
+        ):
+            if condition:
+                reasons.append(code)
+        try:
+            validate_name(entry.pw_name)
+        except ValueError:
+            reasons.append("invalid_username")
+        return reasons
 
     def local_entries(self):
         # pwd may use NSS/LDAP; only local passwd entries are eligible for writes.
@@ -400,6 +483,7 @@ class Accounts:
     def list(self, state):
         result = []
         entries = self.local_entries()
+        self.recover_creation_records(state, entries)
         self.observe_identities(state, entries)
         for entry in entries:
             meta = state["accounts"].get(str(entry.pw_uid), {})
@@ -436,7 +520,16 @@ class Accounts:
                     id=str(entry.pw_uid),
                     lifecycle_id=state["account_observations"][str(entry.pw_uid)]["lifecycle_id"],
                     identity_conflict=bool(meta.get("identity_conflict")),
-                    recovery_required=bool(meta.get("rename_recovery_required")),
+                    recovery_required=bool(meta.get("rename_recovery_required"))
+                    or meta.get("creation", {}).get("status") == "incomplete",
+                    creation={
+                        k: meta["creation"].get(k)
+                        for k in ("status", "stage", "started_at", "updated_at", "error_code", "profile")
+                    }
+                    if meta.get("creation")
+                    else None,
+                    readonly_reasons=self.readonly_reasons(entry, meta),
+                    lifecycle=lifecycle_details(meta),
                     uid=entry.pw_uid,
                     gid=entry.pw_gid,
                     primary_group=primary_group,
@@ -486,7 +579,9 @@ class Accounts:
                 protected=self.protected(e),
                 managed=bool(state["accounts"].get(str(e.pw_uid), {}).get("managed"))
                 and not state["accounts"].get(str(e.pw_uid), {}).get("identity_conflict")
-                and not state["accounts"].get(str(e.pw_uid), {}).get("rename_recovery_required"),
+                and not state["accounts"].get(str(e.pw_uid), {}).get("rename_recovery_required")
+                and state["accounts"].get(str(e.pw_uid), {}).get("creation", {}).get("status")
+                != "incomplete",
             )
             for e in entries
         ]
@@ -510,6 +605,7 @@ class Accounts:
                         managed=bool(meta) and meta.get("gid") == g.gr_gid,
                         identity_conflict=bool(meta) and meta.get("gid") != g.gr_gid,
                         revision=meta.get("revision", 1),
+                        share_owner=meta.get("share_owner"),
                     ),
                     accounts,
                     state["shares"],
@@ -534,7 +630,7 @@ class Accounts:
                 return account
         raise DomainError("not_found", "local account not found", 404)
 
-    def writable(self, state, ident, adopt=False):
+    def writable(self, state, ident, adopt=False, resume=False):
         account = self.find(state, ident)
         try:
             validate_name(account["username"])
@@ -542,6 +638,12 @@ class Accounts:
             raise DomainError(
                 "protected_account", "only normal validated local account names are editable", 403
             ) from exc
+        if state["accounts"].get(str(ident), {}).get("creation", {}).get("status") == "incomplete":
+            if not resume:
+                raise DomainError("creation_incomplete", "explicit creation recovery required", 409)
+            self.creation_identity(state["accounts"][str(ident)]["creation"])
+        elif resume:
+            raise DomainError("creation_not_pending", "account creation is not pending", 409)
         if state["accounts"].get(str(ident), {}).get("rename_recovery_required"):
             raise DomainError(
                 "rename_recovery_required",
@@ -643,7 +745,7 @@ class Accounts:
         if activity["scheduled"]:
             raise DomainError("account_scheduled", "offline rename requires scheduled jobs/services removed")
 
-    def write_files(self, account, keys=None, initialize=False):
+    def write_files(self, account, keys=None, initialize=False, resume=False):
         home = Path(account["home"])
         fd = open_directory(home)
         try:
@@ -655,15 +757,43 @@ class Accounts:
                     ".profile": 'umask 077\nexport DATA_DIR="$HOME/data"\n',
                     ".bashrc": 'umask 077\nexport DATA_DIR="$HOME/data"\n',
                 }.items():
+                    temporary = ".gpupm-profile-" + uuid4().hex
                     out = os.open(
-                        name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=fd
+                        temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=fd
                     )
                     try:
                         os.write(out, text.encode())
                         os.fchown(out, account["uid"], account["gid"])
+                        os.fsync(out)
+                        try:
+                            os.link(temporary, name, src_dir_fd=fd, dst_dir_fd=fd, follow_symlinks=False)
+                        except FileExistsError:
+                            if not resume:
+                                raise
+                            existing = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=fd)
+                            try:
+                                info = os.fstat(existing)
+                                if (
+                                    not stat.S_ISREG(info.st_mode)
+                                    or info.st_uid != account["uid"]
+                                    or info.st_mode & 0o077
+                                    or os.read(existing, 4096) != text.encode()
+                                ):
+                                    raise DomainError(
+                                        "creation_path_conflict", "initial profile changed", 409
+                                    )
+                            finally:
+                                os.close(existing)
+                        os.fsync(fd)
                     finally:
                         os.close(out)
-                os.symlink(account["data_dir"], "data", dir_fd=fd)
+                        os.unlink(temporary, dir_fd=fd)
+                try:
+                    os.symlink(account["data_dir"], "data", dir_fd=fd)
+                except FileExistsError:
+                    if not resume or os.readlink("data", dir_fd=fd) != account["data_dir"]:
+                        raise
+                os.fsync(fd)
             if keys is not None:
                 validate_keys(keys)
                 try:
@@ -743,7 +873,91 @@ class Accounts:
         )
         meta["baseline_restricted"] = baseline["restricted"]
 
+    def finish_creation_login(self, account, meta):
+        creation = meta["creation"]
+        self.creation_identity(creation)
+        for label, path in (("home", creation["home"]), ("data", creation["data_dir"])):
+            base = secure_directory(self.config.get(label + "_base", "/" + label))
+            if (
+                str(base / creation["username"]) != path
+                or os.stat(base).st_dev != creation["parent_devices"][label]
+            ):
+                raise DomainError(
+                    "creation_path_conflict", "provisioning root changed before login finalization", 409
+                )
+            anchor = creation["directories"][label]
+            try:
+                fd = open_directory(path)
+                try:
+                    info = os.fstat(fd)
+                    if (info.st_dev, info.st_ino, info.st_uid) != (
+                        anchor["device"],
+                        anchor["inode"],
+                        creation["uid"],
+                    ) or stat.S_IMODE(info.st_mode) != 0o700:
+                        raise DomainError(
+                            "creation_path_conflict",
+                            "provisioned directory changed before login finalization",
+                            409,
+                        )
+                finally:
+                    os.close(fd)
+            except OSError as exc:
+                raise DomainError("creation_path_conflict", "provisioned directory unavailable", 409) from exc
+        baseline = meta["baseline"]
+        restricted = restriction_active(meta)
+        locked = baseline["password"] if baseline["password"].startswith("!") else "!" + baseline["password"]
+        expiry = ""
+        if meta.get("expires_on"):
+            expiry = str(
+                int(datetime.fromisoformat(meta["expires_on"]).replace(tzinfo=timezone.utc).timestamp())
+                // 86400
+            )
+        target = dict(
+            password=locked if restricted else baseline["password"],
+            shell="/usr/sbin/nologin" if restricted else baseline["shell"],
+            expire="1" if restricted else expiry,
+        )
+        current = self.shadow_baseline(account["username"])
+        if (
+            current["password"] not in {locked, target["password"]}
+            or current["shell"] not in {"/usr/sbin/nologin", target["shell"]}
+            or current["expire"] not in {"1", target["expire"]}
+        ):
+            raise DomainError(
+                "external_policy_changed",
+                "provisioning login policy differs from recorded initial/final states",
+                409,
+            )
+        if any(current[key] != value for key, value in target.items()):
+            self.run(
+                [
+                    "usermod",
+                    "--lock" if target["password"].startswith("!") else "--unlock",
+                    "--shell",
+                    target["shell"],
+                    "--expiredate",
+                    target["expire"] or "-1",
+                    account["username"],
+                ]
+            )
+        current = self.shadow_baseline(account["username"])
+        if any(current[key] != value for key, value in target.items()):
+            raise DomainError("login_policy_unverified", "final account login policy readback differs", 503)
+        meta.update(
+            agent_restricted=restricted,
+            agent_expire_value=target["expire"],
+            baseline_restricted=baseline["restricted"],
+            login_policy_status="applied",
+        )
+        meta["creation"].update(stage="initialized", updated_at=utcnow().isoformat())
+
     def apply_login(self, account, meta):
+        if (
+            meta.get("creation", {}).get("status") == "complete"
+            and meta["creation"].get("stage") == "login_pending"
+        ):
+            return self.finish_creation_login(account, meta)
         if not meta.get("agent_restricted") and restriction_active(meta):
             self.capture_external_policy(account, meta)
         baseline = meta["baseline"]
@@ -941,7 +1155,314 @@ class Accounts:
             os.close(home_fd)
             os.close(data_fd)
 
-    def execute(self, state, action, ident, changes):
+    def adoption_preflight(self, account):
+        home = str(Path(self.config.get("home_base", "/home")) / account["username"])
+        data = str(Path(self.config.get("data_base", "/data")) / account["username"])
+        checks = [
+            dict(
+                code="home_path",
+                path=account["home"],
+                ok=account["home"] == home,
+                actual=account["home"],
+                expected=home,
+            )
+        ]
+        for code, path in (("home_directory", home), ("data_directory", data)):
+            actual = None
+            try:
+                fd = open_directory(path)
+                try:
+                    info = os.fstat(fd)
+                    actual = dict(uid=info.st_uid, mode=oct(stat.S_IMODE(info.st_mode)))
+                    ok = info.st_uid == account["uid"] and stat.S_IMODE(info.st_mode) == 0o700
+                finally:
+                    os.close(fd)
+            except (DomainError, OSError):
+                ok = False
+            checks.append(
+                dict(
+                    code=code,
+                    path=path,
+                    ok=ok,
+                    actual=actual,
+                    expected=dict(uid=account["uid"], mode="0o700"),
+                )
+            )
+        return dict(
+            ready=all(c["ok"] for c in checks),
+            checks=checks,
+            manual_steps=[]
+            if all(c["ok"] for c in checks)
+            else [
+                "Root must inspect the existing home and data paths and prepare account-owned private directories.",
+                "Existing home paths outside configured roots require a separately approved migration; this operation never moves data.",
+                "Repeat the preview after resolving every failed check.",
+            ],
+        )
+
+    def creation_identity(self, creation):
+        try:
+            entry = pwd.getpwnam(creation["username"])
+        except KeyError as exc:
+            raise DomainError("creation_identity_conflict", "provisioning account is missing", 409) from exc
+        if (
+            getattr(entry, "pw_gecos", None) != creation["marker"]
+            or entry.pw_dir != creation["home"]
+            or (creation.get("uid") is not None and entry.pw_uid != creation["uid"])
+            or (creation.get("gid") is not None and entry.pw_gid != creation["gid"])
+        ):
+            raise DomainError(
+                "creation_identity_conflict",
+                "provisioning identity changed; root reconciliation required",
+                409,
+            )
+        return entry
+
+    def recover_creation_records(self, state, entries):
+        for entry in entries:
+            creation = state.get("account_creations", {}).get(entry.pw_name)
+            if not creation or creation["status"] != "incomplete":
+                continue
+            try:
+                self.creation_identity(creation)
+            except DomainError:
+                continue
+            ident = str(entry.pw_uid)
+            if ident not in state["accounts"]:
+                if ident in state.get("account_observations", {}):
+                    continue
+                creation.update(uid=entry.pw_uid, gid=entry.pw_gid)
+                state["accounts"][ident] = dict(
+                    managed=True,
+                    identity_username=entry.pw_name,
+                    identity_home=entry.pw_dir,
+                    data_dir=creation["data_dir"],
+                    revision=1,
+                    disabled=False,
+                    deleted_at=None,
+                    creation=copy.deepcopy(creation),
+                    agent_restricted=True,
+                    login_policy_status="creation_incomplete",
+                )
+
+    def provision_directory(self, state, creation, base, label, uid, gid):
+        parent = open_directory(base)
+        try:
+            expected_id = self.config.get(label + "_dev_id")
+            expected_device = self.config.get(label + "_device")
+            if (
+                os.fstat(parent).st_dev != creation["parent_devices"][label]
+                or (expected_id is not None and os.fstat(parent).st_dev != expected_id)
+                or (expected_device and os.fstat(parent).st_dev != os.stat(expected_device).st_rdev)
+            ):
+                raise DomainError("device_mismatch", "controlled parent device changed", 503)
+            anchor = creation.setdefault("directories", {}).get(label)
+            name = creation["username"]
+            if not anchor:
+                if os.path.lexists(Path(base) / name):
+                    raise DomainError("path_conflict", "unowned provisioning path exists", 409)
+                staging = ".gpupm-create-" + uuid4().hex
+                os.mkdir(staging, 0o700, dir_fd=parent)
+                info = os.stat(staging, dir_fd=parent, follow_symlinks=False)
+                os.fsync(parent)
+                anchor = dict(staging=staging, device=info.st_dev, inode=info.st_ino)
+                creation["directories"][label] = anchor
+                self.checkpoint(state)
+            try:
+                info = os.stat(name, dir_fd=parent, follow_symlinks=False)
+            except FileNotFoundError:
+                info = os.stat(anchor["staging"], dir_fd=parent, follow_symlinks=False)
+                if (info.st_dev, info.st_ino) != (anchor["device"], anchor["inode"]):
+                    raise DomainError("creation_path_conflict", "provisioning directory changed", 409)
+                rename_noreplace(parent, anchor["staging"], parent, name)
+                os.fsync(parent)
+            child = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent)
+            try:
+                info = os.fstat(child)
+                if (info.st_dev, info.st_ino) != (anchor["device"], anchor["inode"]) or info.st_uid not in {
+                    os.geteuid(),
+                    uid,
+                }:
+                    raise DomainError("creation_path_conflict", "provisioning directory changed", 409)
+                os.fchown(child, uid, gid)
+                os.fchmod(child, 0o700)
+            finally:
+                os.close(child)
+        except OSError as exc:
+            raise DomainError(
+                "creation_path_conflict", "provisioning directory missing or unsafe", 409
+            ) from exc
+        finally:
+            os.close(parent)
+
+    def provision(self, state, action, ident, changes, profile=None):
+        if not changes.get("password") and not changes.get("public_keys"):
+            raise DomainError("credentials_required", "fresh password or SSH public key required", 422)
+        if action == "create":
+            try:
+                name = validate_name(changes["username"])
+            except (KeyError, ValueError) as exc:
+                raise DomainError("invalid_username", str(exc), 422) from exc
+            try:
+                pwd.getpwnam(name)
+            except KeyError:
+                pass
+            else:
+                raise DomainError(
+                    "account_exists", "account exists; use explicit recovery for pending creation", 409
+                )
+        else:
+            if set(changes) - {"password", "public_keys", "require_password_change"}:
+                raise DomainError(
+                    "invalid_fields", "recovery only accepts fresh credentials and password policy", 422
+                )
+            meta = state["accounts"].get(str(ident), {})
+            creation = meta.get("creation", {})
+            if creation.get("status") != "incomplete":
+                raise DomainError("creation_not_pending", "account creation is not pending", 409)
+            entry = self.creation_identity(creation)
+            state.setdefault("account_creations", {})[creation["username"]] = creation
+            name = creation["username"]
+            changes = {**creation["settings"], **changes}
+            native = self.shadow_baseline(name)
+            if native["shell"] != "/usr/sbin/nologin" or native["expire"] != "1":
+                raise DomainError(
+                    "external_policy_changed",
+                    "provisioning login restriction changed; root reconciliation required",
+                    409,
+                )
+            current_groups = self.find(state, ident).get("groups", [])
+            self.validate_permission_groups(
+                state, [g for g in changes.get("groups", []) if g != "human" and g not in current_groups]
+            )
+        if changes.get("password"):
+            quality_password(changes["password"], name)
+        else:
+            changes = dict(changes, require_password_change=False)
+        home_base = secure_directory(self.config.get("home_base", "/home"))
+        data_base = secure_directory(self.config.get("data_base", "/data"))
+        self.assert_devices(home_base, data_base)
+        if action == "create":
+            home, data = home_base / name, data_base / name
+            if os.path.lexists(home) or os.path.lexists(data):
+                raise DomainError("path_conflict", "home or data path already exists", 409)
+            self.ensure_human_group()
+            self.observe_identities(state, self.local_entries())
+            now = utcnow().isoformat()
+            creation = dict(
+                status="incomplete",
+                stage="native_account",
+                started_at=now,
+                updated_at=now,
+                username=name,
+                home=str(home),
+                data_dir=str(data),
+                marker="gpupm-create-" + uuid4().hex,
+                profile=profile,
+                parent_devices={"home": os.stat(home_base).st_dev, "data": os.stat(data_base).st_dev},
+                settings={k: v for k, v in changes.items() if k not in {"password", "public_keys"}},
+            )
+            state.setdefault("account_creations", {})[name] = creation
+            self.checkpoint(state)
+            self.run(
+                [
+                    "useradd",
+                    "--groups",
+                    "human",
+                    "--user-group",
+                    "--no-create-home",
+                    "--shell",
+                    "/usr/sbin/nologin",
+                    "--expiredate",
+                    "1",
+                    "--home-dir",
+                    str(home),
+                    "--comment",
+                    creation["marker"],
+                    name,
+                ]
+            )
+            entry = pwd.getpwnam(name)
+            if (
+                str(entry.pw_uid) in state.get("account_observations", {})
+                or str(entry.pw_uid) in state["accounts"]
+            ):
+                raise DomainError(
+                    "uid_lifecycle_conflict",
+                    "allocated UID was previously observed; root reconciliation required",
+                    403,
+                )
+            creation.update(uid=entry.pw_uid, gid=entry.pw_gid)
+            meta = dict(
+                managed=True,
+                identity_username=name,
+                identity_home=str(home),
+                data_dir=str(data),
+                revision=1,
+                disabled=False,
+                deleted_at=None,
+                creation=creation,
+                agent_restricted=True,
+                login_policy_status="creation_incomplete",
+            )
+            state["accounts"][str(entry.pw_uid)] = meta
+        else:
+            if (
+                creation["home"] != str(home_base / name)
+                or creation["data_dir"] != str(data_base / name)
+                or creation["parent_devices"]
+                != {"home": os.stat(home_base).st_dev, "data": os.stat(data_base).st_dev}
+            ):
+                raise DomainError("creation_path_conflict", "configured provisioning roots changed", 409)
+            # New requests never inherit credentials and cannot change the recorded provisioning plan.
+            if (
+                set(changes)
+                - set(creation["settings"])
+                - {"password", "public_keys", "require_password_change"}
+            ):
+                raise DomainError("invalid_fields", "recovery only accepts fresh credentials", 422)
+        account = dict(
+            id=str(entry.pw_uid),
+            uid=entry.pw_uid,
+            gid=entry.pw_gid,
+            username=name,
+            home=creation["home"],
+            data_dir=creation["data_dir"],
+        )
+        creation.update(stage="directories", updated_at=utcnow().isoformat())
+        self.checkpoint(state)
+        self.run(["usermod", "--lock", "--expiredate", "1", "--shell", "/usr/sbin/nologin", name])
+        for label, base in (("home", home_base), ("data", data_base)):
+            self.provision_directory(state, creation, base, label, entry.pw_uid, entry.pw_gid)
+        meta.update(private_group=name, private_gid=entry.pw_gid)
+        state["groups"][name] = {"revision": 1, "gid": entry.pw_gid}
+        creation.update(stage="files", updated_at=utcnow().isoformat())
+        self.checkpoint(state)
+        self.write_files(account, changes.get("public_keys", []), initialize=True, resume=True)
+        creation.update(stage="credentials", updated_at=utcnow().isoformat())
+        self.checkpoint(state)
+        if changes.get("password"):
+            self.run(["chpasswd"], input=f"{name}:{changes['password']}\n")
+        else:
+            self.run(["usermod", "--password", "*", name])
+        meta["baseline"] = self.shadow_baseline(name)
+        meta["baseline"].update(shell="/bin/bash", expire="", restricted=False)
+        self.run(["usermod", "--lock", name])
+        meta["agent_restricted"] = True
+        creation.update(stage="policy", updated_at=utcnow().isoformat())
+        self.checkpoint(state)
+        return account, meta, changes
+
+    def execute(self, state, action, ident, changes, reason=None, profile=None):
+        if profile is not None:
+            from gpupm.domain.schemas import AccountProfile
+
+            try:
+                profile = AccountProfile.model_validate(profile).model_dump()
+            except ValueError as exc:
+                raise DomainError("invalid_profile", "invalid account business profile", 422) from exc
+            if action != "create":
+                raise DomainError("invalid_profile", "business profile can only be reserved on creation", 422)
         unknown = set(changes) - {
             "username",
             "password",
@@ -1011,115 +1532,8 @@ class Accounts:
                 date.fromisoformat(changes["expires_on"])
             except (ValueError, TypeError) as exc:
                 raise DomainError("invalid_expiry", "ISO expiry date required", 422) from exc
-        if action == "create":
-            try:
-                name = validate_name(changes["username"])
-            except (KeyError, ValueError) as exc:
-                raise DomainError("invalid_username", str(exc), 422) from exc
-            try:
-                pwd.getpwnam(name)
-            except KeyError:
-                pass
-            else:
-                raise DomainError("account_exists", "account already exists, including soft-deleted account")
-            if not changes.get("password") and not changes.get("public_keys"):
-                raise DomainError("credentials_required", "password or SSH public key required", 422)
-            if changes.get("password"):
-                quality_password(changes["password"], name)
-            home_base = secure_directory(self.config.get("home_base", "/home"))
-            data_base = secure_directory(self.config.get("data_base", "/data"))
-            self.assert_devices(home_base, data_base)
-            home = home_base / name
-            data = data_base / name
-            if os.path.lexists(home) or os.path.lexists(data):
-                raise DomainError("path_conflict", "home or data path already exists")
-            self.ensure_human_group()
-            argv = [
-                "useradd",
-                "--groups",
-                "human",
-                "--user-group",
-                "--no-create-home",
-                "--shell",
-                "/usr/sbin/nologin",
-                "--expiredate",
-                "1",
-                "--home-dir",
-                str(home),
-                name,
-            ]
-            self.observe_identities(state, self.local_entries())
-            self.run(argv)
-            entry = pwd.getpwnam(name)
-            if (
-                str(entry.pw_uid) in state.get("account_observations", {})
-                or str(entry.pw_uid) in state["accounts"]
-            ):
-                self.observe_identities(state, self.local_entries())
-                raise DomainError(
-                    "uid_lifecycle_conflict",
-                    "native allocator reused a previously observed UID; new account remains locked for root reconciliation",
-                    403,
-                )
-            account = dict(
-                id=str(entry.pw_uid),
-                uid=entry.pw_uid,
-                gid=entry.pw_gid,
-                username=name,
-                home=str(home),
-                data_dir=str(data),
-            )
-            # Account remains locked on partial provisioning; never deletes data/account to roll back.
-            for base in (home_base, data_base):
-                fd = open_directory(base)
-                try:
-                    expected_id = self.config.get("home_dev_id" if base == home_base else "data_dev_id")
-                    if expected_id is not None and os.fstat(fd).st_dev != expected_id:
-                        raise DomainError(
-                            "device_mismatch",
-                            "controlled parent device changed; account remains restricted",
-                            503,
-                        )
-                    expected = self.config.get("home_device" if base == home_base else "data_device")
-                    if expected and os.fstat(fd).st_dev != os.stat(expected).st_rdev:
-                        raise DomainError(
-                            "device_mismatch",
-                            "controlled parent device changed; account remains restricted",
-                            503,
-                        )
-                    os.mkdir(name, 0o700, dir_fd=fd)
-                    child = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
-                    try:
-                        os.fchown(child, entry.pw_uid, entry.pw_gid)
-                        os.fchmod(child, 0o700)
-                    finally:
-                        os.close(child)
-                finally:
-                    os.close(fd)
-            meta = dict(
-                managed=True,
-                identity_username=name,
-                identity_home=str(home),
-                data_dir=str(data),
-                revision=1,
-                disabled=False,
-                deleted_at=None,
-                baseline=self.shadow_baseline(name),
-                login_policy_status="pending",
-            )
-            state["accounts"][account["id"]] = meta
-            state["groups"][name] = {"revision": 1, "gid": entry.pw_gid}
-            meta["private_group"] = name
-            meta["private_gid"] = entry.pw_gid
-            self.write_files(account, changes.get("public_keys", []), initialize=True)
-            if changes.get("password"):
-                self.run(["chpasswd"], input=f"{name}:{changes['password']}\n")
-            else:
-                self.run(["usermod", "--password", "*", name])
-            meta["baseline"] = self.shadow_baseline(name)
-            meta["baseline"].update(shell="/bin/bash", expire="", restricted=False)
-            meta["agent_restricted"] = True
-            self.run(["usermod", "--lock", name])
+        if action in {"create", "resume"}:
+            account, meta, changes = self.provision(state, action, ident, changes, profile=profile)
         else:
             account = self.writable(state, ident, adopt=changes.get("managed") is True)
             meta = state["accounts"].setdefault(
@@ -1130,23 +1544,12 @@ class Accounts:
                 meta["private_gid"] = account["gid"]
             if not meta.get("managed"):
                 # Adoption never imports arbitrary user-chosen paths into managed filesystem operations.
-                expected_home = str(Path(self.config.get("home_base", "/home")) / account["username"])
-                expected_data = str(Path(self.config.get("data_base", "/data")) / account["username"])
-                if account["home"] != expected_home:
+                preflight = self.adoption_preflight(account)
+                if not preflight["ready"]:
                     raise DomainError(
-                        "adoption_path_conflict", "account home is outside controlled managed path"
+                        "adoption_path_conflict", "resolve adoption preview checks before retrying", 409
                     )
-                for path in (expected_home, expected_data):
-                    path_fd = open_directory(path)
-                    try:
-                        info = os.fstat(path_fd)
-                        if info.st_uid != account["uid"] or info.st_mode & 0o077:
-                            raise DomainError(
-                                "adoption_path_conflict",
-                                "adoption requires account-owned private home/data directories",
-                            )
-                    finally:
-                        os.close(path_fd)
+                expected_data = str(Path(self.config.get("data_base", "/data")) / account["username"])
                 meta.update(
                     managed=True, data_dir=expected_data, baseline=self.shadow_baseline(account["username"])
                 )
@@ -1163,13 +1566,13 @@ class Accounts:
                 raise DomainError("account_deleted", "restore soft-deleted account first")
             meta["login_policy_status"] = "pending"
             if action == "disable":
-                meta["disabled"] = True
+                meta.update(disabled=True, disabled_at=utcnow().isoformat(), disabled_reason=reason)
             elif action == "enable":
-                meta["disabled"] = False
+                meta.update(disabled=False, disabled_at=None, disabled_reason=None)
             elif action == "delete":
-                meta["deleted_at"] = utcnow().isoformat()
+                meta.update(deleted_at=utcnow().isoformat(), deleted_reason=reason)
             elif action == "restore":
-                meta["deleted_at"] = None
+                meta.update(deleted_at=None, deleted_reason=None)
             elif action != "update":
                 raise DomainError("unsupported_action", "unsupported account action", 422)
             if meta.get("deleted_at") and action not in {"delete", "restore"}:
@@ -1210,12 +1613,16 @@ class Accounts:
             if changes["shell"] not in {"/bin/bash", "/bin/sh", "/usr/sbin/nologin"}:
                 raise DomainError("invalid_shell", "shell must be an allowed login shell", 422)
             meta["baseline"]["shell"] = changes["shell"]
-            if not restriction_active(meta):
+            if not restriction_active(meta) and not meta.get("agent_restricted"):
                 self.run(["usermod", "--shell", changes["shell"], account["username"]])
+        if "expires_on" in changes:
+            meta.update(expiry_reason=reason, expiry_set_at=utcnow().isoformat())
         for field in ("notes", "public_keys", "expires_on", "require_password_change"):
-            if field in changes:
+            if field in changes and not (field == "public_keys" and action in {"create", "resume"}):
                 meta[field] = changes[field]
-        if changes.get("require_password_change", action == "create" and bool(changes.get("password"))):
+        if changes.get(
+            "require_password_change", action in {"create", "resume"} and bool(changes.get("password"))
+        ):
             self.run(["chage", "--lastday", "0", account["username"]])
             meta["require_password_change"] = True
             meta["agent_password_change"] = True
@@ -1233,7 +1640,21 @@ class Accounts:
                 ]
             )
             meta["agent_password_change"] = False
-        self.apply_login(account, meta)
+        if action in {"create", "resume"}:
+            meta["public_keys"] = changes.get("public_keys", [])
+            meta["login_policy_status"] = "pending"
+            meta["creation"].update(
+                status="complete", stage="login_pending", error_code=None, updated_at=utcnow().isoformat()
+            )
+            self.checkpoint(state)
+        try:
+            self.apply_login(account, meta)
+        except DomainError as exc:
+            if action in {"create", "resume"}:
+                # Initialization is complete; keep login-policy failure distinct from unfinished provisioning.
+                meta["login_policy_status"] = exc.code
+                self.checkpoint(state)
+            raise
         meta["revision"] += 1
         return self.find(state, account["id"])
 

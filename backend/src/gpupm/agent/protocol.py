@@ -1,5 +1,6 @@
 """Bounded local RPC; authorization is kernel peer credentials, never JSON actor."""
 
+import base64
 import json
 import socket
 import struct
@@ -7,6 +8,8 @@ import struct
 from gpupm.errors import DomainError
 
 MAX_FRAME = 1024 * 1024
+# shortcut: cap assembled snapshots at 64 MiB; use incremental history sync beyond this scale.
+MAX_SNAPSHOT = 64 * MAX_FRAME
 
 
 def exact(sock, count):
@@ -54,6 +57,24 @@ def handle_connection(sock, service, allowed_uid):
         if not isinstance(request.get("method"), str) or not isinstance(request.get("params", {}), dict):
             raise DomainError("invalid_request", "method and params required", 400)
         result = service.call(request["method"], request.get("params", {}))
-        write_frame(sock, dict(version=1, result=result))
+        response = dict(version=1, result=result)
+        if request["method"] == "snapshot" and request.get("snapshot_stream") is True:
+            data = json.dumps(response, separators=(",", ":"), ensure_ascii=False).encode()
+            if len(data) > MAX_SNAPSHOT:
+                raise DomainError("response_too_large", "snapshot exceeds total limit", 413)
+            if len(data) > MAX_FRAME:
+                # One dispatch gives every frame the same task/account revisions.
+                for sequence, offset in enumerate(range(0, len(data), MAX_FRAME // 2)):
+                    write_frame(
+                        sock,
+                        dict(
+                            version=1,
+                            sequence=sequence,
+                            snapshot_size=len(data),
+                            chunk=base64.b64encode(data[offset : offset + MAX_FRAME // 2]).decode("ascii"),
+                        ),
+                    )
+                return
+        write_frame(sock, response)
     except DomainError as exc:
         write_frame(sock, dict(version=1, error=dict(code=exc.code, message=exc.message, status=exc.status)))

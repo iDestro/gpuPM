@@ -25,7 +25,8 @@ from gpupm.agent.processes import (
     residual_status,
     valid_leader_identity,
 )
-from gpupm.domain.rules import deadline, parse_time, utcnow
+from gpupm.domain.user_policy import policy_editable
+from gpupm.domain.rules import deadline, task_timing, parse_time, utcnow
 from gpupm.domain.settings import (
     DEFAULT_SETTINGS,
     task_defaults,
@@ -33,6 +34,7 @@ from gpupm.domain.settings import (
     ignored_process,
 )
 from gpupm.errors import DomainError
+from gpupm.domain.schemas import validate_business_changes
 
 
 class AgentService:
@@ -77,7 +79,6 @@ class AgentService:
                 accounts={},
                 groups={},
                 shares=[],
-                quotas={},
                 jobs={},
                 previews={},
                 idempotency={},
@@ -277,15 +278,7 @@ class AgentService:
             )
             if any(v is None for p in task["members"] for v in p["gpu_memory"].values()):
                 task["memory_used"] = None
-            task["runtime_seconds"] = max(0, int((utcnow() - parse_time(task["started_at"])).total_seconds()))
-            due = deadline(
-                parse_time(task["started_at"]),
-                task.get("max_runtime_seconds"),
-                parse_time(task.get("expires_at")),
-            )
-            task["deadline_at"] = due.isoformat() if due else None
-            task["remaining_seconds"] = int((due - utcnow()).total_seconds()) if due else None
-            task["overdue"] = bool(due and due <= utcnow() and task["status"] == "running")
+            task.update(task_timing(task, utcnow()))
         state["collected_at"] = utcnow().isoformat()
 
     def find(self, state, kind, ident):
@@ -382,7 +375,11 @@ class AgentService:
                 excluded.append(dict(identity=member["identity"], reason="protected"))
             elif member["status"] in {"zombie", "Z"}:
                 excluded.append(dict(identity=member["identity"], reason="zombie; parent must reap"))
-            elif member["ppid"] == 1 and not (residual_only or task.get("cleanup_orphans")):
+            elif (
+                member["ppid"] == 1
+                and member["identity"] not in task.get("leader_identities", [])
+                and not (residual_only or task.get("cleanup_orphans"))
+            ):
                 excluded.append(dict(identity=member["identity"], reason="orphan cleanup not authorized"))
             else:
                 targets.append(member)
@@ -392,17 +389,31 @@ class AgentService:
 
     def call(self, method, params=None):
         p = params or {}
-        mutation = method.startswith("execute_") or method == "apply_quota"
+        mutation = method.startswith("execute_")
         if mutation and not self.config.get("allow_mutations", False):
             raise DomainError("mutations_disabled", "root config allow_mutations is false", 403)
         with self.lock, self.database() as db:
             state = self.load(db)
+
+            def checkpoint(value):
+                self.save(db, value)
+                db.commit()
+
+            self.accounts.checkpoint = checkpoint
             try:
                 result = self.dispatch(state, method, p)
             except (ValueError, TypeError, KeyError) as exc:
                 raise DomainError("invalid_request", str(exc), 422) from exc
             except DomainError as exc:
                 if mutation:
+                    if method == "execute_account_change":
+                        creation_name = p.get("changes", {}).get("username")
+                        creation = state.get("account_creations", {}).get(creation_name)
+                        if creation and creation.get("status") == "incomplete":
+                            creation.update(error_code=exc.code, updated_at=utcnow().isoformat())
+                        meta = state["accounts"].get(str(p.get("id")), {})
+                        if meta.get("creation", {}).get("status") == "incomplete":
+                            meta["creation"].update(error_code=exc.code, updated_at=utcnow().isoformat())
                     if method == "execute_account_change" and str(p.get("id")) in state["accounts"]:
                         meta = state["accounts"][str(p["id"])]
                         meta["revision"] += 1
@@ -411,12 +422,40 @@ class AgentService:
                 self.save(db, state)
                 db.commit()
                 raise
+            finally:
+                self.accounts.checkpoint = lambda state: None
             self.save(db, state)
             return copy.deepcopy(result)
 
     def dispatch(self, state, method, p):
         if method == "health":
-            return dict(status="ok", source="host", mutations=self.config.get("allow_mutations", False))
+            from gpupm.agent.accounts import secure_directory
+
+            roots = {
+                key: self.config.get(key, default)
+                for key, default in (
+                    ("home_base", "/home"),
+                    ("data_base", "/data"),
+                    ("share_base", "/data/shared"),
+                )
+            }
+            try:
+                home = secure_directory(roots["home_base"])
+                data = secure_directory(roots["data_base"])
+                secure_directory(roots["share_base"])
+                self.accounts.assert_devices(home, data)
+                readiness = dict(ready=True, error_code=None)
+            except (DomainError, OSError) as exc:
+                readiness = dict(
+                    ready=False, error_code=exc.code if isinstance(exc, DomainError) else "unsafe_path"
+                )
+            return dict(
+                status="ok",
+                source="host",
+                mutations=self.config.get("allow_mutations", False),
+                roots=roots,
+                root_readiness=readiness,
+            )
         if method == "heartbeat":
             versions = p.get("policy_versions", {})
             if not isinstance(versions, dict):
@@ -522,6 +561,9 @@ class AgentService:
             self.require_human_task(task)
             self.revision(task, p)
             policy = p["policy"]
+            account = next((a for a in self.accounts.list(state) if a["uid"] == task["uid"]), None)
+            if any(task.get(k) != v for k, v in policy.items()) and not policy_editable(account):
+                raise DomainError("policy_readonly", "account task policy is read-only", 403)
             fields = {
                 "name",
                 "notes",
@@ -573,6 +615,7 @@ class AgentService:
                     self.revision(task, dict(revision=p["revisions"].get(task["id"])))
                 target = tasks[0]
                 target["members"] = [m for t in tasks for m in t["members"]]
+                target["gpu_uuids"] = sorted({gpu for t in tasks for gpu in t.get("gpu_uuids", [])})
                 target["historic_identities"] = list({i for t in tasks for i in t["historic_identities"]})
                 target["leader_identities"] = [
                     identity for task in tasks for identity in task.get("leader_identities", [])
@@ -595,10 +638,12 @@ class AgentService:
                 if keys == member_keys:
                     raise DomainError("invalid_split", "select part of task")
                 new = copy.deepcopy(task)
+                new["policy_parent_task_id"] = task["id"]
                 new.update(
                     id=str(uuid4()),
                     revision=1,
                     members=members,
+                    gpu_uuids=sorted({gpu for m in members for gpu in m.get("gpu_memory", {})}),
                     historic_identities=list(keys),
                     leader_identities=[
                         m["identity"] for m in members if m["ppid"] not in {p["pid"] for p in members}
@@ -701,14 +746,20 @@ class AgentService:
                 has_more=start + len(items) < len(events),
             )
         if method == "preview_account_change":
+            business_changes = validate_business_changes(p.get("business_changes", {}))
             if "password" in p.get("changes", {}):
                 raise DomainError(
                     "credentials_in_preview", "passwords must never be included in previews", 422
                 )
             account = self.accounts.writable(
-                state, p["id"], adopt=p.get("changes", {}).get("managed") is True
+                state,
+                p["id"],
+                adopt=p.get("changes", {}).get("managed") is True,
+                resume=p["action"] == "resume",
             )
             self.revision(account, p)
+            if p["action"] == "resume" and p.get("changes"):
+                raise DomainError("credentials_in_preview", "recovery preview must have empty changes", 422)
             preview = self.preview(
                 state,
                 "account",
@@ -716,8 +767,17 @@ class AgentService:
                 p["action"],
                 changes={k: v for k, v in p.get("changes", {}).items() if k != "password"},
             )
+            from gpupm.agent.accounts import account_change_details
+
+            preview.update(account_change_details(account, p["action"], p.get("changes", {})))
+            preview["business_changes"] = business_changes
+            state["previews"][preview["token"]]["business_changes"] = business_changes
             preview["activity"] = self.accounts.activity(state, p["id"])
             preview["paths"] = {key: account.get(key) for key in ("home", "data_dir")}
+            if p.get("changes", {}).get("managed") is True and not account["managed"]:
+                preview["adoption"] = self.accounts.adoption_preflight(account)
+            if p["action"] == "resume":
+                preview["creation"] = account.get("creation")
             preview["impact"] = (
                 "Existing processes, sessions, scheduled activity and files are retained. Disabling/soft-deleting blocks new logins only; restore/enable preserve other restriction causes."
             )
@@ -735,19 +795,29 @@ class AgentService:
             changes = p.get("changes", {})
             action = p["action"]
             if action != "create":
-                account = self.accounts.writable(state, p["id"], adopt=changes.get("managed") is True)
+                account = self.accounts.writable(
+                    state, p["id"], adopt=changes.get("managed") is True, resume=action == "resume"
+                )
                 self.revision(account, p)
                 # All potentially dangerous changes are previewed, including public keys/adoption.
-                self.checked(
+                preview = self.checked(
                     state,
                     p,
                     "account",
                     account,
                     action,
-                    {k: v for k, v in changes.items() if k != "password"},
+                    {} if action == "resume" else {k: v for k, v in changes.items() if k != "password"},
                 )
+                if preview.get("business_changes", {}) != validate_business_changes(
+                    p.get("business_changes", {})
+                ):
+                    raise DomainError("scope_changed", "business changes differ from preview", 409)
             before = self.accounts.find(state, p["id"]) if action != "create" else None
-            result = self.accounts.execute(state, action, p.get("id"), changes)
+            if action == "resume" and (not isinstance(p.get("reason"), str) or not p["reason"].strip()):
+                raise DomainError("reason_required", "recovery requires an audit reason", 422)
+            result = self.accounts.execute(
+                state, action, p.get("id"), changes, reason=p.get("reason"), profile=p.get("profile")
+            )
             state["previews"].pop(p.get("token"), None)
             self.event(state, p, "account." + action, result["id"], before, result)
             return result
@@ -755,9 +825,7 @@ class AgentService:
             return self.group_change(state, method, p)
         if method in {
             "storage_snapshot",
-            "get_quotas",
-            "preview_quota",
-            "apply_quota",
+            "refresh_storage",
             "list_shares",
             "preview_share_change",
             "execute_share_change",
@@ -808,7 +876,7 @@ class AgentService:
                 entry = self.accounts.find(state, str(__import__("pwd").getpwnam(name).pw_uid))
                 if not self.accounts.is_human(entry["uid"]):
                     raise DomainError("non_human_readonly", "group members must be human", 403)
-                if entry["protected"] or not entry["managed"]:
+                if entry["protected"] or not entry["managed"] or entry.get("recovery_required"):
                     raise DomainError("protected_account", "grant only to managed ordinary accounts", 403)
         if "name" in changes:
             name = validate_name(changes["name"])
@@ -1005,17 +1073,17 @@ class AgentService:
         finally:
             self.workers.pop(ident, None)
 
-    def collect_storage(self):
+    def collect_storage(self, scan_directories=False):
         from gpupm.agent.storage import Storage
 
-        if not self.storage_scan_lock.acquire(blocking=False):
+        if not self.storage_scan_lock.acquire(blocking=scan_directories):
             return
         try:
             with self.lock, self.database() as db:
                 copied = self.load(db)
                 original_events = len(copied["events"])
-            # Directory traversal and native quota reads cannot block process authority/heartbeat.
-            result = Storage(self).snapshot(copied)
+            # Directory traversal cannot block process authority/heartbeat.
+            result = Storage(self).snapshot(copied, scan_directories=scan_directories)
             with self.lock, self.database() as db:
                 state = self.load(db)
                 for share in state["shares"]:
@@ -1028,13 +1096,13 @@ class AgentService:
                         None,
                     )
                     if scanned:
-                        for field in ("usage_bytes", "usage_files", "usage_status"):
+                        for field in ("usage_bytes", "usage_status", "collected_at"):
                             share[field] = scanned.get(field)
                 result["shares"] = copy.deepcopy(state["shares"])
                 if state.get("acl_verified_at"):
                     result["capabilities"]["acl"] = dict(
-                        status="verified",
-                        message="Share directory ACL applied and numeric readback verified",
+                        status="requires_attention" if any(s.get("status") == "access_recheck_required" for s in state["shares"]) else "verified",
+                        message="Review per-project permission status and last successful ACL verification",
                         verified_at=state["acl_verified_at"],
                     )
                 state["storage"] = result
@@ -1062,11 +1130,17 @@ class AgentService:
                     ):
                         continue
                     meta = state["accounts"][account["id"]]
-                    if meta.get("rename_recovery_required"):
+                    if (
+                        meta.get("rename_recovery_required")
+                        or meta.get("creation", {}).get("status") == "incomplete"
+                    ):
                         continue
                     from gpupm.agent.accounts import restriction_active
 
-                    if restriction_active(meta) != meta.get("agent_restricted", False):
+                    if (
+                        restriction_active(meta) != meta.get("agent_restricted", False)
+                        or meta.get("creation", {}).get("stage") == "login_pending"
+                    ):
                         try:
                             self.accounts.apply_login(account, meta)
                         except DomainError as exc:
